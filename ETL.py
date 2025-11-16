@@ -22,10 +22,14 @@ def load_token():
 def generateToken():
     access_token, token_expiration = load_token()
 
-    if access_token is None or time.time() >= token_expiration:
-        if os.path.exists(TOKEN_FILE):
-            os.remove(TOKEN_FILE)
+    if access_token and time.time() < token_expiration:
+        print("Using cached token")
+        return access_token
 
+    if os.path.exists(TOKEN_FILE):
+        os.remove(TOKEN_FILE)
+
+    print("Generating new token")
     url = "https://id.twitch.tv/oauth2/token"
     params = {
         "client_id": os.getenv('clientID'),
@@ -38,7 +42,7 @@ def generateToken():
     access_token = data.get("access_token")
     expires_in = data.get("expires_in", 0)
 
-    token_expiration = time.time() + expires_in - 60 # 60 seconds buffer
+    token_expiration = time.time() + expires_in
     save_token(access_token, token_expiration)
     return access_token
 

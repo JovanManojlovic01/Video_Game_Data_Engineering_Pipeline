@@ -41,9 +41,9 @@
   "keyToString": {
     "Python.ETL.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
-    "git-widget-placeholder": "main",
+    "git-widget-placeholder": "extractData,generateToken-Improvements",
     "ignore.virus.scanning.warn.message": "true",
-    "last_opened_file_path": "C:/Users/jovan/OneDrive/Desktop/Job/Cybersecurity/Projects/cyber-log-analyzer",
+    "last_opened_file_path": "C:/Users/jovan/OneDrive/Desktop/Job/Data Analysis/Projects/Video_Game_Trends",
     "run.code.analysis.last.selected.profile": "pProject Default",
     "settings.editor.selected.configurable": "project.propVCSSupport.DirectoryMappings"
   }
