@@ -4,17 +4,25 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 import os
+import logging
 
-load_dotenv('.env')
+logger = logging.getLogger(__name__)
+
+if not load_dotenv('.env'):
+    logger.critical("File .env not found or could not be loaded.")
+
 TOKEN_FILE = os.getenv('tokenFile')
+if not TOKEN_FILE:
+    logger.warning("Environment variable 'tokenFile' not set or does not exist. Will create a new one")
 
 
 def save_token(token, expires_at):
     try:
         with open(TOKEN_FILE, "w") as f:
             json.dump({"access_token": token, "expires_at": expires_at}, f)
+            logging.info("Token saved to file.")
     except IOError as e:
-        print(f"Error saving token to file: {e}")
+        logging.error(f"Error saving token to file: {e}")
 
 
 def load_token():
@@ -22,10 +30,11 @@ def load_token():
         if os.path.exists(TOKEN_FILE):
             with open(TOKEN_FILE, "r") as f:
                 data = json.load(f)
+                logging.info("Token loaded from file.")
                 return data.get("access_token"), data.get("expires_at")
         return None, 0
     except (IOError, ValueError) as e:
-        print(f"Error loading token from file: {e}")
+        logging.error(f"Error loading token from file: {e}")
         return None, 0
 
 
@@ -33,13 +42,14 @@ def generateToken():
     access_token, token_expiration = load_token()
 
     if access_token and time.time() < token_expiration:
-        print("Using cached token")
+        logging.info("Using cached token")
         return access_token
 
     if os.path.exists(TOKEN_FILE):
         os.remove(TOKEN_FILE)
+        logging.info("Expired token file removed")
 
-    print("Generating new token")
+    logging.info("Generating new token")
     url = "https://id.twitch.tv/oauth2/token"
     params = {
         "client_id": os.getenv('clientID'),
@@ -53,32 +63,32 @@ def generateToken():
         data = response.json()
 
     except requests.exceptions.Timeout:
-        print("API Request timed out.")
+        logging.error("API Request timed out.")
         return None
     except requests.exceptions.ConnectionError:
-        print("Connection error occurred.")
+        logging.error("Connection error occurred.")
         return None
     except requests.exceptions.HTTPError as e:
-        print(f"HTTP error occurred: {e}")
+        logging.error(f"HTTP error occurred: {e}")
         if e.response.status_code == 429:
-            print("Too many requests. Please try again later.")
+            logging.error("Too many requests. Please try again later.")
         return None
     except requests.exceptions.RequestException as e:
-        print(f"An unexpected error occurred: {e}")
+        logging.error(f"An unexpected error occurred: {e}")
         return None
     except ValueError as e:
-        print(f"Failed to parse token response JSON: {e}")
+        logging.error(f"Failed to parse token response JSON: {e}")
         return None
 
     access_token = data.get("access_token")
     if not access_token:
-        print("Token response did not contain 'access_token'.")
+        logging.error("Token response did not contain 'access_token'.")
         return None
 
     try:
         expires_in = int(data.get("expires_in", 0))
     except (TypeError, ValueError) as e:
-        print(f"Invalid 'expires_in' value: {e}")
+        logging.error(f"Invalid 'expires_in' value: {e}")
         expires_in = 0
 
     token_expiration = time.time() + expires_in
@@ -88,51 +98,53 @@ def generateToken():
 def extractData():
     fieldArray = []
 
-    endpoint = input("Enter the endpoint you wish to gather data from:").strip()
+    logger.info("Starting data extraction process")
+
+    endpoint = input("Enter the endpoint you wish to gather data from:").strip().lower()
     if not endpoint:
-        print("Endpoint cannot be empty.")
+        logging.error("Endpoint cannot be empty.")
         return None
 
     try:
-        fieldNumberOf = int(input("Please enter the number of fields you wish to use:"))
+        fieldNumberOf = int(input("Please enter the number of fields you wish to use:").strip())
         if fieldNumberOf <= 0:
-            print("Number of fields must be a positive number.")
+            logging.error("Number of fields must be a positive number.")
             return None
     except ValueError:
-        print("Invalid input. Please enter a valid number for the number of fields.")
+        logging.error("Invalid input. Please enter a valid number for the number of fields.")
         return None
 
     for i in range(fieldNumberOf):
-        field = input(f"Enter field number {i + 1}: ")
+        field = input(f"Enter field number {i + 1}: ").strip()
         fieldArray.append(field)
         print(fieldArray)  #DEBUG
 
     releaseSort = input("Do you wish to have the release date sorted in ascending or descending order? asc/desc:").strip().lower()
     if releaseSort not in ("asc", "desc"):
-        print("Invalid sord order selected. Defaulting to asc")
+        logging.error("Invalid sort order selected. Defaulting to asc")
         releaseSort = "asc"
 
     try:
         limit = int(input("How many inputs do you wish to gather:").strip())
         if limit <= 0:
-            print("Limit must be a positive number.")
+            logging.error("Limit must be a positive number.")
             return None
     except ValueError:
-        print("Invalid input. Please enter a valid number for the limit.")
+        logging.error("Invalid input. Please enter a valid number for the limit.")
         return None
 
     try:
-        offset = int(input("Is there any entries you wish to skip? type 0 if you do not want to skip:"))
+        offset = int(input("Is there any entries you wish to skip? type 0 if you do not want to skip:").strip())
         if offset < 0:
-            print("Offset cannot be negative.")
+            logging.error("Offset cannot be negative.")
             return None
     except ValueError:
-        print("Invalid input. Please enter a valid number for the offset.")
+        logging.error("Invalid input. Please enter a valid number for the offset.")
         return None
 
     token = generateToken()
     if not token:
-        print("Failed to obtain access token.")
+        logging.error("Failed to obtain access token.")
         return None
 
     headers = {
@@ -154,56 +166,59 @@ def extractData():
         response.raise_for_status()
 
     except requests.exceptions.Timeout:
-        print("API Request timed out.")
+        logging.error("API Request timed out.")
         return None
     except requests.exceptions.ConnectionError:
-        print("Connection error occurred.")
+        logging.error("Connection error occurred.")
         return None
     except requests.exceptions.HTTPError as e:
-        print(f"HTTP error occurred: {e}")
+        logging.error(f"HTTP error occurred: {e}")
         if e.response.status_code == 429:
-            print("Too many requests. Please try again later.")
+            logging.error("Too many requests. Please try again later.")
         return None
     except requests.exceptions.RequestException as e:
-        print(f"An unexpected error occurred: {e}")
+        logging.error(f"An unexpected error occurred: {e}")
         return None
 
 
     try:
         games = response.json()
     except ValueError as e:
-        print(f"Failed to parse response JSON: {e}")
+        logging.error(f"Failed to parse response JSON: {e}")
         return None
 
-    print("Responses Gathered")
+    logging.info("Responses Gathered")
     time.sleep(0.25)
     try:
         df = pd.json_normalize(games)
     except Exception as e:
-        print(f"Error normalizing JSON data: {e}")
+        logging.error(f"Error normalizing JSON data: {e}")
         return None
 
-    print("Creating JSON file of results")
+    logging.info("Creating JSON file of results")
     try:
         df.to_json(f'{endpoint}_data.json', orient='records', indent=4, force_ascii=False)
     except Exception as e:
-        print(f"Error writing JSON file: {e}")
+        logging.error(f"Error writing JSON file: {e}")
         return None
-    print("JSON file created")
+    logging.info("JSON file created")
 
     time.sleep(0.25)
 
-    print("Creating CSV file of results")
+    logging.info("Creating CSV file of results")
     try:
         df.to_csv(f'{endpoint}_data.csv', index=False, encoding='utf-8')
     except Exception as e:
-        print(f"Error writing CSV file: {e}")
+        logging.error(f"Error writing CSV file: {e}")
         return None
-    print("CSV file created")
+    logging.info("CSV file created")
 
     time.sleep(0.25)  #Just in case to avoid hitting rate limit of 4 requests/sec
     return games
 
 if __name__ == "__main__":
+    logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s - %(filename)s:%(lineno)d - %(message)s",
+                        level=logging.INFO,
+                        handlers=[logging.StreamHandler(), logging.FileHandler("app.log", encoding="utf-8")])
     games = extractData()
     print(games)  #DEBUG
