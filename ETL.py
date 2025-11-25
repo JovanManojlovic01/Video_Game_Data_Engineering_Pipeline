@@ -1,35 +1,41 @@
-import requests
-from dotenv import load_dotenv
-import os
+import logging
 
-load_dotenv('.env')
+from auth import generate_token
+from env_config import ensure_env_variables
+from exporter import export_results
+from igdb_client import fetch_games
+from user_input import prompt_for_query_settings
 
-def generateToken():
-    url = "https://id.twitch.tv/oauth2/token"
-    params = {
-        "client_id": os.getenv('CLIENTID'),
-        "client_secret": os.getenv('CLIENTSECRET'),
-        "grant_type": "client_credentials"
-    }
+logger = logging.getLogger(__name__)
 
-    response = requests.post(url, params=params)
-    access_token = response.json().get("access_token")
-    return access_token
 
-def extractData():
-    url = 'https://api.igdb.com/v4/games' # url for getting 'games' data
+def main() -> None:
+    """
+    Main function to run the ETL process for fetching and exporting game data from IGDB.
+    :return: None
+    """
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(filename)s:%(lineno)d - %(message)s",
+        level=logging.INFO,
+        handlers=[logging.StreamHandler(), logging.FileHandler("app.log", encoding="utf-8")],
+    )
 
-    headers = {
-        "Client-ID": os.getenv('clientID'),
-        "Authorization": f"Bearer {generateToken()}"
-    }
+    ensure_env_variables()
+    settings = prompt_for_query_settings()
+    token = generate_token()
+    if not token:
+        logger.critical("Failed to acquire access token.")
+        return
 
-    data = "fields name, release_dates, rating, aggregated_rating;"
+    games = fetch_games(settings, token)
+    record_count = len(games)
+    logger.info("Fetched %d records from IGDB.", record_count)
+    if not record_count:
+        logger.error("No data returned from IGDB.")
+        return
 
-    response = requests.post(url, headers=headers, data=data)
-    games = response.json()
-    return games
+    export_results(settings.endpoint, games)
+
 
 if __name__ == "__main__":
-    games = extractData()
-    print(games)
+    main()
