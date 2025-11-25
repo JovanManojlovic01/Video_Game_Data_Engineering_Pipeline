@@ -28,7 +28,9 @@ def main() -> None:
         return
 
     games = fetch_games(settings, token)
-    if not games:
+    record_count = len(games)
+    logger.info("Fetched %d records from IGDB.", record_count)
+    if not record_count:
         logger.error("No data returned from IGDB.")
         return
 

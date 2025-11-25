@@ -1,10 +1,9 @@
 import logging
 import os
 from typing import Any, List
-
 import requests
-
 from user_input import QuerySettings
+from json.decoder import JSONDecodeError
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://api.igdb.com/v4"
@@ -45,7 +44,18 @@ def fetch_games(settings: QuerySettings, token: str) -> List[Any]:
             timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
-        return response.json()
+
+        content_type = response.headers.get("Content-Type", "") # IGDB should return JSON
+        if "application/json" not in content_type.lower():
+            logger.error("Unexpected content type from IGDB: %s", content_type)
+            return []
+
+        try:
+            return response.json()
+        except JSONDecodeError as exc:
+            logger.error("Failed to decode IGDB JSON response: %s", exc)
+            return []
+
     except requests.exceptions.Timeout:
         logger.error("IGDB request timed out.")
     except requests.exceptions.ConnectionError:
