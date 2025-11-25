@@ -5,8 +5,22 @@ import requests
 from dotenv import load_dotenv
 import os
 import logging
+import sys
+
+BASE_URL = "https://api.igdb.com/v4/"
+TOKEN_ENDPOINT = "https://id.twitch.tv/oauth2/token"
+TOKEN_TIMEOUT = 5  # Timeout for token requests in seconds
+REQUEST_TIMEOUT = 10  # Timeout for API requests in seconds
+SLEEP_TIME = 0.25  # Time to sleep between requests to avoid rate limiting
 
 logger = logging.getLogger(__name__)
+required_env_variables = ['clientID', 'clientSecret', 'tokenFile']
+
+def ensure_env_variables():
+    missing_vars = [var for var in required_env_variables if not os.getenv(var)]
+    if missing_vars:
+        logger.critical(f"Missing required environment variables: {', '.join(missing_vars)}")
+        sys.exit(1)
 
 if not load_dotenv('.env'):
     logger.critical("File .env not found or could not be loaded.")
@@ -50,7 +64,6 @@ def generateToken():
         logging.info("Expired token file removed")
 
     logging.info("Generating new token")
-    url = "https://id.twitch.tv/oauth2/token"
     params = {
         "client_id": os.getenv('clientID'),
         "client_secret": os.getenv('clientSecret'),
@@ -58,7 +71,7 @@ def generateToken():
     }
 
     try:
-        response = requests.post(url, params=params, timeout=5)
+        response = requests.post(TOKEN_ENDPOINT, params=params, timeout=TOKEN_TIMEOUT)
         response.raise_for_status()
         data = response.json()
 
@@ -156,13 +169,13 @@ def extractData():
 
     query = (f""
              f"{fieldQuery}"
-             "where rating != null;"
+             #"where rating != null;"
              f"limit {limit};"
-             f"offset {offset};"
-             f"sort release_dates {releaseSort};")
+             f"offset {offset};")
+             #f"sort release_dates {releaseSort};")
 
     try:
-        response = requests.post(f'https://api.igdb.com/v4/{endpoint}', headers=headers, data=query, timeout=10)
+        response = requests.post(f'{BASE_URL}/{endpoint}', headers=headers, data=query, timeout= REQUEST_TIMEOUT)
         response.raise_for_status()
 
     except requests.exceptions.Timeout:
@@ -188,7 +201,7 @@ def extractData():
         return None
 
     logging.info("Responses Gathered")
-    time.sleep(0.25)
+    time.sleep(SLEEP_TIME)
     try:
         df = pd.json_normalize(games)
     except Exception as e:
@@ -203,7 +216,7 @@ def extractData():
         return None
     logging.info("JSON file created")
 
-    time.sleep(0.25)
+    time.sleep(SLEEP_TIME)
 
     logging.info("Creating CSV file of results")
     try:
@@ -213,12 +226,13 @@ def extractData():
         return None
     logging.info("CSV file created")
 
-    time.sleep(0.25)  #Just in case to avoid hitting rate limit of 4 requests/sec
+    time.sleep(SLEEP_TIME)  #Just in case to avoid hitting rate limit of 4 requests/sec
     return games
 
 if __name__ == "__main__":
     logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s - %(filename)s:%(lineno)d - %(message)s",
                         level=logging.INFO,
                         handlers=[logging.StreamHandler(), logging.FileHandler("app.log", encoding="utf-8")])
+    ensure_env_variables()
     games = extractData()
     print(games)  #DEBUG
