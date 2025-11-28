@@ -5,10 +5,24 @@ import logging
 import yaml
 from pathlib import Path
 from typing import Dict, List, Union
+from datetime import datetime
+from dataclasses import dataclass
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DataQualityMetrics:
+    processed_count: int = 0
+    skipped_count: int = 0
+    error_count: int = 0
+
+    def log_progress(self):
+        logger.info("Progress: processed: %d, skipped: %d, errors: %d",
+                    self.processed_count, self.skipped_count, self.error_count)
+
 
 def load_config(config_path: Union[str, Path] = "config.yaml") -> Dict:
     """
@@ -28,50 +42,129 @@ def load_config(config_path: Union[str, Path] = "config.yaml") -> Dict:
     logger.info("Configuration loaded from %s", path)
     return config
 
-def normalize_list_of_values(games: List[Dict], field: str, out_col: str) -> pd.DataFrame:
+
+def save_error_log(errors: List[Dict], output_dir: Path) -> None:
+    if not errors:
+        return
+
+    error_log_path = output_dir / f"error_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with error_log_path.open("w", encoding="utf-8") as f:
+        json.dump(errors, f, indent=4, ensure_ascii=False)
+
+    logger.info(" Error log saved to %s", error_log_path)
+
+
+def normalize_list_of_values(games: List[Dict], field: str, out_col: str, errors: List[Dict]) -> pd.DataFrame:
     """
-    Normalize a list of values from the specified field in the games data.
+    Normalize a list of values from the specified field in the "games" data.
     :param: games: list of game records (dictionaries).
             field: source field containing list of values.
             out_col: specified output column name.
     :return:
         A DataFrame with game_id and the specified output column.
     """
+    if errors is None:
+        errors = []
+
     rows = []
+    metrics = DataQualityMetrics()
     for g in games:
         gid = g.get("id")
-        vals = g.get(field, []) or []
-        if isinstance(vals, list):
-            for v in vals:
-                rows.append({"game_id": gid, out_col: v})
+        try:
+            vals = g.get(field, []) or []
+            if vals is None or (isinstance(vals, list) and len(vals) == 0):
+                logger.warning("Game ID %s has empty or null field %s", gid, field)
+            if isinstance(vals, list):
+                for v in vals:
+                    rows.append({"game_id": gid, out_col: v})
+                    metrics.processed_count += 1
+            else:
+                logger.warning("Expected list for field %s in game ID %s, got %s",
+                               field, gid, type(vals).__name__)
+                errors.append({
+                    "game_id": gid,
+                    "field": field,
+                    "error_type": "type_mismatch",
+                    "expected_type": "list",
+                    "actual_type": type(vals).__name__,
+                    "value": str(g.get(field))
+                })
+        except Exception as e:
+            logger.error("Error processing game ID %s field '%s': %s (value=%s)",
+                         gid, field, e, g.get(field))
+            metrics.error_count += 1
+            errors.append({
+                "game_id": gid,
+                "field": field,
+                "error_type": "exception",
+                "error": str(e),
+                "value": str(g.get(field))
+            })
+            continue
+    metrics.log_progress()
     return pd.DataFrame(rows, columns=["game_id", out_col])
 
 
-def normalize_list_of_dicts(games: List[Dict], field: str, rename_map: Dict[str, str]) -> pd.DataFrame:
+def normalize_list_of_dicts(games: List[Dict], field: str, rename_map: Dict[str, str],
+                            errors: List[Dict]) -> pd.DataFrame:
     """
-    Normalize a list of dictionaries from the specified field in the games data.
+    Normalize a list of dictionaries from the specified field in the "games" data.
     :param: games: list of game records (dictionaries).
             field: source field containing list of dictionaries.
             rename_map: mapping of old field names to new column names.
     :return:
         A DataFrame with game_id and the renamed columns.
     """
+    if errors is None:
+        errors = []
+
     rows = []
+    metrics = DataQualityMetrics()
     for g in games:
         gid = g.get("id")
-        items = g.get(field, []) or []
-        if not isinstance(items, list):
+        try:
+            items = g.get(field, []) or []
+            if items is None or (isinstance(items, list) and len(items) == 0):
+                logger.warning("Game ID %s has empty or null field %s", gid, field)
+            if not isinstance(items, list):
+                continue
+            for it in items:
+                if isinstance(it, dict):
+                    rec = {"game_id": gid}
+                    rec.update({new: it.get(old) for old, new in rename_map.items()})
+                    rows.append(rec)
+                    metrics.processed_count += 1
+                else:
+                    logger.warning("Expected dict in list for field %s in game ID %s, got %s",
+                                   field, gid, type(it).__name__)
+                    errors.append({
+                        "game_id": gid,
+                        "field": field,
+                        "error_type": "type_mismatch",
+                        "expected_type": "dict",
+                        "actual_type": type(it).__name__,
+                        "value": str(g.get(field))
+                    })
+        except Exception as e:
+            logger.error("Error processing game ID %s field '%s': %s (items=%s)",
+                         gid, field, e, g.get(field))
+            metrics.error_count += 1
+            errors.append({
+                "game_id": gid,
+                "field": field,
+                "error_type": "exception",
+                "error": str(e),
+                "value": str(g.get(field))
+            })
             continue
-        for it in items:
-            if isinstance(it, dict):
-                rec = {"game_id": gid}
-                rec.update({new: it.get(old) for old, new in rename_map.items()})
-                rows.append(rec)
+    metrics.log_progress()
     cols = ["game_id", *rename_map.values()]
     return pd.DataFrame(rows, columns=cols)
 
 
-def transform_games(games: List[Dict], config:Dict) -> pd.DataFrame:
+def transform_games(games: List[Dict], config: Dict) -> pd.DataFrame:
     """
     Transform the games data into a normalized DataFrame.
     :param:
@@ -80,10 +173,14 @@ def transform_games(games: List[Dict], config:Dict) -> pd.DataFrame:
     :return:
         A DataFrame with selected game fields.
     """
-    df = pd.json_normalize(games)
-    keep = config.get("tables", {}).get("games", {}).get("fields", [])
-    existing = [c for c in keep if c in df.columns]
-    return df[existing] if existing else pd.DataFrame(columns=keep)
+    try:
+        df = pd.json_normalize(games)
+        keep = config.get("tables", {}).get("games", {}).get("fields", [])
+        existing = [c for c in keep if c in df.columns]
+        return df[existing] if existing else pd.DataFrame(columns=keep)
+    except Exception as e:
+        logger.error("Error normalizing games data: %s", e)
+        return pd.DataFrame(columns=config.get("tables", {}).get("games", {}).get("fields", []))
 
 
 def validate_structure(data: any, source_path: Path) -> None:
@@ -130,7 +227,7 @@ def validate_required_fields(games: List[Dict], config: Dict) -> None:
         if missing:
             raise ValueError(f"Game record at index {i} is missing required fields: {missing}")
 
-    for i,game in enumerate(sample):  # Recommended fields
+    for i, game in enumerate(sample):  # Recommended fields
         missing_recommended = [field for field in recommended if field not in game]
         if missing_recommended:
             logger.warning("Record %d is missing recommended fields: %s", i, missing_recommended)
@@ -204,11 +301,12 @@ def dump_normalized_table(df: pd.DataFrame, path: Path, output_config: Dict) -> 
     orient = output_config.get("orient", "records")
     indent = output_config.get("indent", 2)
     force_ascii = output_config.get("force_ascii", False)
-    df.to_json(path.as_posix(), orient= orient, indent= indent, force_ascii= force_ascii)
+    df.to_json(path.as_posix(), orient=orient, indent=indent, force_ascii=force_ascii)
     logger.info("Wrote %s (rows=%d)", path, len(df))
 
 
-def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[str, Path] = "normalized", config_path: Union[str, Path] = "config.yaml" ) -> None:
+def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[str, Path] = "normalized",
+                            config_path: Union[str, Path] = "config.yaml") -> None:
     """
     Normalize the exported JSON file into tidy tables.
     :param:
@@ -219,6 +317,7 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         None
     """
     config = load_config(config_path)
+    errors = []
 
     src = Path(raw_json_path)
     if not src.exists():
@@ -239,20 +338,54 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         genres_cfg = table_configs["genres"]
         tables["genres"] = normalize_list_of_values(games,
                                                     genres_cfg["source_field"],
-                                                    genres_cfg["output_column"]
-                                                    )
+                                                    genres_cfg["output_column"],
+                                                    errors)
 
     if "platforms" in table_configs:  # Platforms table
         platforms_cfg = table_configs["platforms"]
         tables["platforms"] = normalize_list_of_values(games,
                                                        platforms_cfg["source_field"],
-                                                       platforms_cfg["output_column"]
-                                                       )
+                                                       platforms_cfg["output_column"],
+                                                       errors)
 
     out_dir = Path(output_dir)
     output_config = config.get("output", {})
     for name, df in tables.items():
         dump_normalized_table(df, out_dir / f"{name}.json", output_config)
+
+    save_error_log(errors, out_dir)
+    logger.info("=" * 60)
+    logger.info("Data Quality Summary:")
+    logger.info(" Total games processed: %d", len(games))
+    logger.info(" Total errors encountered: %d", len(errors))
+    for name, df in tables.items():
+        logger.info(" Table '%s': %d records", name.capitalize(), len(df))
+    logger.info("=" * 60)
+
+    logger.info("Summary Statistics:")
+
+    if "games" in tables and not tables["games"].empty:  # Games statistics
+        games_df = tables["games"]
+        logger.info(" Games table:")
+        if "released" in games_df.columns:
+            logger.info("   Released dates: %d unique values", games_df["released"].nunique())
+        if "rating" in games_df.columns:
+            logger.info("   Average rating: %.2f", games_df["rating"].mean())
+            logger.info("   Rating range: %.2f - %.2f", games_df["rating"].min(), games_df["rating"].max())
+
+    if "genres" in tables and not tables["genres"].empty:  # Genres statistics
+        genre_counts = tables["genres"].groupby("genre").size().sort_values(ascending=False)
+        logger.info(" Genres: %d unique, top 5:", len(genre_counts))
+        for genre, count in genre_counts.head(5).items():
+            logger.info("   %s: %d games", genre, count)
+
+    if "platforms" in tables and not tables["platforms"].empty:  # Platforms statistics
+        platform_counts = tables["platforms"].groupby("platform").size().sort_values(ascending=False)
+        logger.info(" Platforms: %d unique, top 5:", len(platform_counts))
+        for platform, count in platform_counts.head(5).items():
+            logger.info("   %s: %d games", platform, count)
+
+    logger.info("=" * 60)
 
 
 def _parse_args():
