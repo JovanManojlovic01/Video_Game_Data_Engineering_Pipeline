@@ -1,0 +1,56 @@
+tables:
+  games:
+    fields:
+      - id
+      - name
+      - rating
+      - aggregated_rating
+      - first_release_date
+
+
+  genres:
+    source_field: genres
+    output_column: genre_id
+    api_fields:
+      - name
+
+
+  platforms:
+    source_field: platforms
+    output_column: platform_id
+    api_fields:
+      - name
+      - generation
+
+
+  involved_companies:  # Optional table
+    source_field: involved_companies
+    field_mapping:
+      company: company_id
+      developer: is_dev
+      publisher: is_publisher
+
+
+validation:
+  required_fields:
+    -id
+    -name
+  recommended_fields:
+    -rating
+    -first_release_date
+    -aggregated_rating
+    -genres
+    -platforms
+  sample_size: 10
+  min_values:
+    rating: 0
+    aggregated_rating: 0
+  max_values:
+    rating: 100
+    aggregated_rating: 100
+
+output:
+  format: json
+  indent: 2
+  force_ascii: false
+  orient: records

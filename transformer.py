@@ -2,6 +2,7 @@
 import argparse
 import json
 import logging
+import yaml
 from pathlib import Path
 from typing import Dict, List, Union
 
@@ -9,6 +10,23 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+def load_config(config_path: Union[str, Path] = "config.yaml") -> Dict:
+    """
+    Load configuration from a YAML file.
+    :param:
+        config_path: Path to the YAML configuration file.
+    :return:
+        A dictionary with the configuration data.
+    """
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {path}")
+
+    with path.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    logger.info("Configuration loaded from %s", path)
+    return config
 
 def normalize_list_of_values(games: List[Dict], field: str, out_col: str) -> pd.DataFrame:
     """
@@ -53,16 +71,17 @@ def normalize_list_of_dicts(games: List[Dict], field: str, rename_map: Dict[str,
     return pd.DataFrame(rows, columns=cols)
 
 
-def transform_games(games: List[Dict]) -> pd.DataFrame:
+def transform_games(games: List[Dict], config:Dict) -> pd.DataFrame:
     """
     Transform the games data into a normalized DataFrame.
     :param:
         games: list of game records (dictionaries).
+        config: configuration dictionary.
     :return:
         A DataFrame with selected game fields.
     """
     df = pd.json_normalize(games)
-    keep = ["id", "name", "rating", "aggregated_rating", "first_release_date"]
+    keep = config.get("tables", {}).get("games", {}).get("fields", [])
     existing = [c for c in keep if c in df.columns]
     return df[existing] if existing else pd.DataFrame(columns=keep)
 
@@ -89,31 +108,47 @@ def validate_structure(data: any, source_path: Path) -> None:
                          f"but found non-dictionary items at indices: {non_dict_items}.")
 
 
-def validate_required_fields(games: List[Dict], sample_size: int = 10) -> None:
+def validate_required_fields(games: List[Dict], config: Dict) -> None:
     """
     Validate that required fields are present in the game records.
     :param:
         games: list of game records (dictionaries).
-        sample_size: number of records to sample for validation.
+        config: configuration dictionary.
     :return:
         None
     """
-    required = ['id', 'name']
-    recommended = ['rating', 'first_release_date', 'genres', 'platforms']
+    validation = config.get("validation", {})
+    required = validation.get("required_fields", ['id', 'name'])
+    recommended = validation.get("recommended_fields", [])
+    min_values = validation.get("min_values", {})
+    max_values = validation.get("max_values", {})
+    sample_size = validation.get("sample_size", 10)
     sample = games[:min(sample_size, len(games))]
 
-    for i, game in enumerate(sample):
+    for i, game in enumerate(sample):  # Required fields
         missing = [field for field in required if field not in game]
         if missing:
             raise ValueError(f"Game record at index {i} is missing required fields: {missing}")
 
-    for i,game in enumerate(sample):
+    for i,game in enumerate(sample):  # Recommended fields
         missing_recommended = [field for field in recommended if field not in game]
         if missing_recommended:
             logger.warning("Record %d is missing recommended fields: %s", i, missing_recommended)
 
+    for i, game in enumerate(sample):  # Minimum values
+        for field, min_count in min_values.items():
+            if field in game and game[field] is not None:
+                if game[field] < min_count:
+                    logger.warning("Record %d: %s=%s is below minimum %s", i, field, game[field], min_count)
 
-def validate_input_file(raw_json_path: Union[str, Path]) -> bool:
+    for i, game in enumerate(sample):  # Maximum values
+        for field, max_count in max_values.items():
+            if field in game and game[field] is not None:
+                if game[field] > max_count:
+                    logger.warning("Record %d: %s=%s exceeds maximum %s", i, field, game[field], max_count)
+
+
+def validate_input_file(raw_json_path: Union[str, Path], config_path: Union[str, Path] = "config.yaml") -> bool:
     """
     Validate the input JSON file structure and required fields.
     :param:
@@ -121,6 +156,8 @@ def validate_input_file(raw_json_path: Union[str, Path]) -> bool:
     :return:
         True if validation passes, False otherwise.
     """
+    config = load_config(config_path)
+
     src = Path(raw_json_path)
     if not src.exists():
         logger.error(f"Input file not found: {src}")
@@ -128,7 +165,7 @@ def validate_input_file(raw_json_path: Union[str, Path]) -> bool:
 
     try:
         games = load_exported_games(src)
-        validate_required_fields(games)
+        validate_required_fields(games, config)
         logger.info("✓ Validation passed: %s (%d records)", src, len(games))
         return True
     except (ValueError, json.JSONDecodeError) as e:
@@ -153,29 +190,36 @@ def load_exported_games(path: Path) -> List[Dict]:
         raise ValueError(f"Invalid JSON syntax in {path}: {e}")
 
 
-def dump_normalized_table(df: pd.DataFrame, path: Path) -> None:
+def dump_normalized_table(df: pd.DataFrame, path: Path, output_config: Dict) -> None:
     """
     Dump the normalized DataFrame to a JSON file.
     :param:
         df: DataFrame to dump.
         path: Path to the output JSON file.
+        output_config: Configuration for JSON output (orient, indent, force_ascii).
     :return:
         None
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_json(path.as_posix(), orient="records", indent=2, force_ascii=False)
+    orient = output_config.get("orient", "records")
+    indent = output_config.get("indent", 2)
+    force_ascii = output_config.get("force_ascii", False)
+    df.to_json(path.as_posix(), orient= orient, indent= indent, force_ascii= force_ascii)
     logger.info("Wrote %s (rows=%d)", path, len(df))
 
 
-def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[str, Path] = "normalized") -> None:
+def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[str, Path] = "normalized", config_path: Union[str, Path] = "config.yaml" ) -> None:
     """
     Normalize the exported JSON file into tidy tables.
     :param:
         raw_json_path: Path to the raw JSON file.
         output_dir: Output directory for normalized tables.
+        config_path: Path to the YAML configuration file.
     :return:
         None
     """
+    config = load_config(config_path)
+
     src = Path(raw_json_path)
     if not src.exists():
         raise FileNotFoundError(f"Input file not found: {src}")
@@ -184,22 +228,31 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         logger.warning("No records in %s; nothing to normalize.", src)
         return
 
-    tables = {
-        "games": transform_games(games),
-        "genres": normalize_list_of_values(games, "genres", "genre_id"),
-        "platforms": normalize_list_of_values(games, "platforms", "platform_id"),
-        "release_dates": normalize_list_of_dicts(games, "release_dates",
-                                                 {"date": "release_date", "platform": "platform_id"}),
-        "involved_companies": normalize_list_of_dicts(
-            games,
-            "involved_companies",
-            {"company": "company_id", "developer": "is_dev", "publisher": "is_publisher"},
-        ),
-    }
+    validate_required_fields(games, config)
+
+    table_configs = config.get("tables", {})
+    tables = {}
+
+    tables["games"] = transform_games(games, config)  # Games table
+
+    if "genres" in table_configs:  # Genres table
+        genres_cfg = table_configs["genres"]
+        tables["genres"] = normalize_list_of_values(games,
+                                                    genres_cfg["source_field"],
+                                                    genres_cfg["output_column"]
+                                                    )
+
+    if "platforms" in table_configs:  # Platforms table
+        platforms_cfg = table_configs["platforms"]
+        tables["platforms"] = normalize_list_of_values(games,
+                                                       platforms_cfg["source_field"],
+                                                       platforms_cfg["output_column"]
+                                                       )
 
     out_dir = Path(output_dir)
+    output_config = config.get("output", {})
     for name, df in tables.items():
-        dump_normalized_table(df, out_dir / f"{name}.json")
+        dump_normalized_table(df, out_dir / f"{name}.json", output_config)
 
 
 def _parse_args():
@@ -212,6 +265,7 @@ def _parse_args():
     p.add_argument("input", nargs="?", default="games_data.json", help="Path to raw JSON (default: `games_data.json`).")
     p.add_argument("--out-dir", default="normalized", help="Output directory (default: `normalized`).")
     p.add_argument("--validate-only", action="store_true", help="Only validate the input file without transforming.")
+    p.add_argument("--config", default="config.yaml", help="Path to YAML configuration file (default: `config.yaml`).")
     return p.parse_args()
 
 
@@ -220,7 +274,7 @@ if __name__ == "__main__":
     args = _parse_args()
 
     if args.validate_only:
-        success = validate_input_file(args.input)
+        success = validate_input_file(args.input, args.config)
         exit(0 if success else 1)
     else:
-        normalize_exported_file(args.input, args.out_dir)
+        normalize_exported_file(args.input, args.out_dir, args.config)
