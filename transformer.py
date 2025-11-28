@@ -67,6 +67,75 @@ def transform_games(games: List[Dict]) -> pd.DataFrame:
     return df[existing] if existing else pd.DataFrame(columns=keep)
 
 
+def validate_structure(data: any, source_path: Path) -> None:
+    """
+    Validate the structure of the loaded data.
+    :param:
+        data: Loaded data to validate.
+        source_path: Path to the source file for error messages.
+    :return:
+        None
+    """
+    if not isinstance(data, list):
+        raise ValueError(f"Expected a list of game records in {source_path}, got {type(data).__name__}.")
+
+    if not data:
+        logger.warning("No records found in %s.", source_path)
+        return
+
+    non_dict_items = [i for i, item in enumerate(data) if not isinstance(item, dict)]
+    if non_dict_items:
+        raise ValueError(f"Expected each game record to be a dictionary in {source_path}, "
+                         f"but found non-dictionary items at indices: {non_dict_items}.")
+
+
+def validate_required_fields(games: List[Dict], sample_size: int = 10) -> None:
+    """
+    Validate that required fields are present in the game records.
+    :param:
+        games: list of game records (dictionaries).
+        sample_size: number of records to sample for validation.
+    :return:
+        None
+    """
+    required = ['id', 'name']
+    recommended = ['rating', 'first_release_date', 'genres', 'platforms']
+    sample = games[:min(sample_size, len(games))]
+
+    for i, game in enumerate(sample):
+        missing = [field for field in required if field not in game]
+        if missing:
+            raise ValueError(f"Game record at index {i} is missing required fields: {missing}")
+
+    for i,game in enumerate(sample):
+        missing_recommended = [field for field in recommended if field not in game]
+        if missing_recommended:
+            logger.warning("Record %d is missing recommended fields: %s", i, missing_recommended)
+
+
+def validate_input_file(raw_json_path: Union[str, Path]) -> bool:
+    """
+    Validate the input JSON file structure and required fields.
+    :param:
+        raw_json_path: Path to the raw JSON file.
+    :return:
+        True if validation passes, False otherwise.
+    """
+    src = Path(raw_json_path)
+    if not src.exists():
+        logger.error(f"Input file not found: {src}")
+        return False
+
+    try:
+        games = load_exported_games(src)
+        validate_required_fields(games)
+        logger.info("✓ Validation passed: %s (%d records)", src, len(games))
+        return True
+    except (ValueError, json.JSONDecodeError) as e:
+        logger.error("✗ Validation failed: %s", e)
+        return False
+
+
 def load_exported_games(path: Path) -> List[Dict]:
     """
     Load exported games from a JSON file.
@@ -75,8 +144,13 @@ def load_exported_games(path: Path) -> List[Dict]:
     :return:
         A list of game records (dictionaries).
     """
-    with path.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        validate_structure(data, path)
+        return data
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON syntax in {path}: {e}")
 
 
 def dump_normalized_table(df: pd.DataFrame, path: Path) -> None:
@@ -114,7 +188,8 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         "games": transform_games(games),
         "genres": normalize_list_of_values(games, "genres", "genre_id"),
         "platforms": normalize_list_of_values(games, "platforms", "platform_id"),
-        "release_dates": normalize_list_of_dicts(games, "release_dates", {"date": "release_date", "platform": "platform_id"}),
+        "release_dates": normalize_list_of_dicts(games, "release_dates",
+                                                 {"date": "release_date", "platform": "platform_id"}),
         "involved_companies": normalize_list_of_dicts(
             games,
             "involved_companies",
@@ -136,10 +211,16 @@ def _parse_args():
     p = argparse.ArgumentParser(description="Normalize JSON produced by exporter.py into tidy tables.")
     p.add_argument("input", nargs="?", default="games_data.json", help="Path to raw JSON (default: `games_data.json`).")
     p.add_argument("--out-dir", default="normalized", help="Output directory (default: `normalized`).")
+    p.add_argument("--validate-only", action="store_true", help="Only validate the input file without transforming.")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _parse_args()
-    normalize_exported_file(args.input, args.out_dir)
+
+    if args.validate_only:
+        success = validate_input_file(args.input)
+        exit(0 if success else 1)
+    else:
+        normalize_exported_file(args.input, args.out_dir)
