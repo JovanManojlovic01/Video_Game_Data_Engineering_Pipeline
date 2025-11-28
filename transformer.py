@@ -104,7 +104,10 @@ def normalize_list_of_values(games: List[Dict], field: str, out_col: str, errors
             })
             continue
     metrics.log_progress()
-    return pd.DataFrame(rows, columns=["game_id", out_col])
+    df = pd.DataFrame(rows, columns=["game_id", out_col])
+    if 'game_id' in df.columns:
+        df['game_id'] = pd.to_numeric(df['game_id'], errors='coerce').astype('Int64')
+    return df
 
 
 def normalize_list_of_dicts(games: List[Dict], field: str, rename_map: Dict[str, str],
@@ -160,8 +163,12 @@ def normalize_list_of_dicts(games: List[Dict], field: str, rename_map: Dict[str,
             })
             continue
     metrics.log_progress()
-    cols = ["game_id", *rename_map.values()]
-    return pd.DataFrame(rows, columns=cols)
+    df = pd.DataFrame(rows, columns=["game_id", *rename_map.values()])
+    if 'game_id' in df.columns:
+        df['game_id'] = pd.to_numeric(df['game_id'], errors='coerce').astype('Int64')
+    if 'company_id' in df.columns:
+        df['company_id'] = pd.to_numeric(df['company_id'], errors='coerce').astype('Int64')
+    return df
 
 
 def transform_games(games: List[Dict], config: Dict) -> pd.DataFrame:
@@ -176,6 +183,13 @@ def transform_games(games: List[Dict], config: Dict) -> pd.DataFrame:
     try:
         df = pd.json_normalize(games)
         keep = config.get("tables", {}).get("games", {}).get("fields", [])
+        if 'first_release_date' in df.columns:  # Convert timestamp to datetime
+            df['first_release_date'] = pd.to_datetime(df['first_release_date'], unit='s', errors='coerce')
+        if 'id' in df.columns:  # Ensure 'id' is integer type
+            df['id'] = pd.to_numeric(df['id'], errors='coerce').astype('Int64')
+        for rating in ['rating', 'aggregated_rating']:
+            if rating in df.columns:  # Ensure ratings are float type
+                df[rating] = pd.to_numeric(df[rating], errors='coerce').astype('Float64')
         existing = [c for c in keep if c in df.columns]
         return df[existing] if existing else pd.DataFrame(columns=keep)
     except Exception as e:
@@ -348,9 +362,29 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
                                                        platforms_cfg["output_column"],
                                                        errors)
 
+    if "involved_companies" in table_configs:  # Involved Companies table
+        involved_companies_cfg = table_configs["involved_companies"]
+        tables["involved_companies"] = normalize_list_of_values(games,
+                                                               involved_companies_cfg["source_field"],
+                                                               involved_companies_cfg["output_column"],
+                                                               errors)
+
+        for bool_field in ['is_dev', 'is_publisher']:  # Convert boolean fields
+            if bool_field in tables["involved_companies"].columns:
+                tables["involved_companies"][bool_field] = tables["involved_companies"][bool_field].astype('boolean')
+
     out_dir = Path(output_dir)
     output_config = config.get("output", {})
+    schemas = config.get("schemas", {})
+
     for name, df in tables.items():
+        if name in schemas: # Validate schema if defined
+            try:
+                validate_schema(df, schemas[name])
+                logger.info("✓ Schema validation passed for table '%s'.", name)
+            except ValueError as e:
+                logger.error("✗ Schema validation failed for table '%s': %s", name, e)
+                raise
         dump_normalized_table(df, out_dir / f"{name}.json", output_config)
 
     save_error_log(errors, out_dir)
@@ -374,18 +408,42 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
             logger.info("   Rating range: %.2f - %.2f", games_df["rating"].min(), games_df["rating"].max())
 
     if "genres" in tables and not tables["genres"].empty:  # Genres statistics
-        genre_counts = tables["genres"].groupby("genre").size().sort_values(ascending=False)
+        genre_counts = tables["genres"].groupby("genre_id").size().sort_values(ascending=False)
         logger.info(" Genres: %d unique, top 5:", len(genre_counts))
-        for genre, count in genre_counts.head(5).items():
-            logger.info("   %s: %d games", genre, count)
+        for genre_id, count in genre_counts.head(5).items():
+            logger.info("   %s: %d games", genre_id, count)
 
     if "platforms" in tables and not tables["platforms"].empty:  # Platforms statistics
-        platform_counts = tables["platforms"].groupby("platform").size().sort_values(ascending=False)
+        platform_counts = tables["platforms"].groupby("platform_id").size().sort_values(ascending=False)
         logger.info(" Platforms: %d unique, top 5:", len(platform_counts))
-        for platform, count in platform_counts.head(5).items():
-            logger.info("   %s: %d games", platform, count)
+        for platform_id, count in platform_counts.head(5).items():
+            logger.info("   %s: %d games", platform_id, count)
 
     logger.info("=" * 60)
+
+
+def validate_schema(df: pd.DataFrame, expected_schema: Dict[str, str]) -> bool:
+    """
+    Validate the DataFrame against the expected schema.
+    :param:
+        df: DataFrame to validate.
+        expected_schema: Dictionary mapping column names to expected data types.
+    :return:
+        True if the DataFrame matches the expected schema, raises ValueError otherwise.
+    """
+    for col, expected_type in expected_schema.items():
+        if col not in df.columns:
+            continue
+        actual_type = df[col].dtype
+        if expected_type == 'datetime' and not pd.api.types.is_datetime64_any_dtype(actual_type):
+            raise ValueError(f"Column {col}: expected datetime, got {actual_type}")
+        elif expected_type == 'int' and not pd.api.types.is_integer_dtype(actual_type):
+            raise ValueError(f"Column {col}: expected int, got {actual_type}")
+        elif expected_type == 'bool' and not pd.api.types.is_bool_dtype(actual_type):
+            raise ValueError(f"Column {col}: expected bool, got {actual_type}")
+        elif expected_type == 'float' and not pd.api.types.is_float_dtype(actual_type):
+            raise ValueError(f"Column {col}: expected float, got {actual_type}")
+    return True
 
 
 def _parse_args():

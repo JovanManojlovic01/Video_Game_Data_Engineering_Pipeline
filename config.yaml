@@ -25,22 +25,35 @@ tables:
 
   involved_companies:  # Optional table
     source_field: involved_companies
-    field_mapping:
-      company: company_id
-      developer: is_dev
-      publisher: is_publisher
+    output_column: company_id
 
+schemas:
+  games:
+    id: int
+    name: str
+    first_release_date: datetime
+    rating: float
+    aggregated_rating: float
+  genres:
+    genre_id: int
+    game_id: int
+  platforms:
+    platform_id : int
+    game_id: int
+  involved_companies:
+    company_id: int
+    game_id: int
 
 validation:
   required_fields:
-    -id
-    -name
+    - id
+    - name
   recommended_fields:
-    -rating
-    -first_release_date
-    -aggregated_rating
-    -genres
-    -platforms
+    - rating
+    - first_release_date
+    - aggregated_rating
+    - genres
+    - platforms
   sample_size: 10
   min_values:
     rating: 0
