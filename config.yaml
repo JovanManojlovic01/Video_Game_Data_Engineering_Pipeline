@@ -1,0 +1,88 @@
+tables:
+  games:
+    fields:
+      - id
+      - name
+      - rating
+      - aggregated_rating
+      - first_release_date
+
+
+  genres:
+    source_field: genres
+    output_column: genre_id
+    api_fields:
+      - name
+
+
+  platforms:
+    source_field: platforms
+    output_column: platform_id
+    api_fields:
+      - name
+      - generation
+
+
+  involved_companies:  # Optional table
+    source_field: involved_companies
+    output_column: company_id
+
+schemas:
+  games:
+    id: int
+    name: str
+    first_release_date: datetime
+    rating: float
+    aggregated_rating: float
+  genres:
+    genre_id: int
+    game_id: int
+  platforms:
+    platform_id : int
+    game_id: int
+  involved_companies:
+    company_id: int
+    game_id: int
+
+defaults:
+  rating: 0.0
+  aggregated_rating: 0.0
+  genres: []
+  platforms: []
+  involved_companies: []
+
+deduplication:
+  strategy: keep_first
+  tables:
+    - games:
+        key: id
+    - genres:
+        key: [game_id, genre_id]
+    - platforms:
+        key: [game_id, platform_id]
+    - involved_companies:
+        key: [game_id, company_id]
+
+validation:
+  required_fields:
+    - id
+    - name
+  recommended_fields:
+    - rating
+    - first_release_date
+    - aggregated_rating
+    - genres
+    - platforms
+  sample_size: 10
+  min_values:
+    rating: 0
+    aggregated_rating: 0
+  max_values:
+    rating: 100
+    aggregated_rating: 100
+
+output:
+  format: json
+  indent: 2
+  force_ascii: false
+  orient: records
