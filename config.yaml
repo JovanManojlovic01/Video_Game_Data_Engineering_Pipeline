@@ -44,6 +44,13 @@ schemas:
     company_id: int
     game_id: int
 
+defaults:
+  rating: 0.0
+  aggregated_rating: 0.0
+  genres: []
+  platforms: []
+  involved_companies: []
+
 validation:
   required_fields:
     - id

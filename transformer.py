@@ -1,4 +1,38 @@
-# python
+"""
+MISSING VALUE HANDLING STRATEGY
+================================
+
+Critical Fields (records are SKIPPED if missing):
+- id: Unique game identifier (cannot be null or empty)
+- name: Game title (cannot be null or empty)
+
+Optional Fields with Default Values:
+- rating: Defaults to 0.0 if missing or None (empty lists [] are preserved)
+- aggregated_rating: Defaults to 0.0 if missing or None
+- first_release_date: Defaults to None (unknown release)
+- genres: Defaults to empty list [] if missing or None
+- platforms: Defaults to empty list [] if missing or None
+- involved_companies: Defaults to empty list [] if missing or None
+
+Note: Empty strings "" are treated as missing for string fields.
+      Empty lists [] are NOT replaced with defaults (only None or missing fields).
+
+Recommended Fields (WARNING logged if missing):
+- summary: Game description
+- storyline: Game narrative
+
+Validation Process:
+1. Load raw JSON data
+2. Filter out records missing critical fields (logged to errors)
+3. Apply default values to optional fields
+4. Validate remaining records against schema
+5. Transform into normalized tables
+6. Generate missing value report
+
+All skipped records and missing values are logged to error_log_YYYYMMDD_HHMMSS.json
+"""
+
+
 import argparse
 import json
 import logging
@@ -54,6 +88,94 @@ def save_error_log(errors: List[Dict], output_dir: Path) -> None:
         json.dump(errors, f, indent=4, ensure_ascii=False)
 
     logger.info(" Error log saved to %s", error_log_path)
+
+def filter_valid_games(games: List[Dict], errors: List[Dict]) -> List[Dict]:
+    """
+    Filter out invalid game records missing critical fields.
+
+    STRATEGY:
+    - Critical fields (id, name) must exist, records are SKIPPED if missing
+    - All skipped records are logged to the errors list with context
+    - Valid games are returned for further processing
+
+    :param:
+        games: list of game records (dictionaries).
+        errors: list to append error records to.
+    :return:
+        A list of valid game records.
+    """
+    valid_games = []
+    skipped_count = 0
+    for idx, game in enumerate(games):
+        if not game.get("id"):
+            errors.append({
+                "index": idx,
+                "error_type": "missing_critical_field",
+                "field": "id",
+                "game_data": str(game)
+                            })
+            logger.error("Skipping game at index %d due to missing 'id' field.", idx)
+            skipped_count += 1
+            continue
+
+        if not game.get("name"):
+            errors.append({
+                "index": idx,
+                "game_id": game.get("id"),
+                "error_type": "missing_critical_field",
+                "field": "name",
+                "game_data": str(game)
+                            })
+            logger.error("Skipping game ID %s due to missing 'name' field.", game.get("id"))
+            skipped_count += 1
+            continue
+
+        valid_games.append(game)
+
+    logger.info("Filtered %d valid games out of %d total; (skipped %d)",
+                len(valid_games), len(games), skipped_count)
+    return valid_games
+
+
+def apply_default_values(games: List[Dict], config: Dict) -> List[Dict]:
+    """
+    Apply default values to missing fields in game records.
+
+    Default values:
+    - rating: 0.0 (no rating available)
+    - aggregated_rating: 0.0 (no aggregated rating)
+    - genres: [] (no genres specified)
+    - platforms: [] (no platforms specified)
+    - involved_companies: [] (no companies involved)
+
+    :param:
+        games: list of game records (dictionaries).
+        config: configuration dictionary.
+    :return:
+        A list of game records with defaults applied.
+    """
+    defaults = config.get("defaults", {
+        "rating": 0.0,
+        "aggregated_rating": 0.0,
+        "genres": [],
+        "platforms": [],
+        "involved_companies": []
+    })
+
+    if not defaults:
+        logger.warning("No default values specified in configuration.")
+        return games
+
+    applied_count = 0
+    for game in games:
+        for field, default_value in defaults.items():
+            if field not in game or game[field] is None:
+                game[field] = default_value
+                logger.debug("Applied default for game ID %s: %s=%s", game.get("id"), field, default_value)
+                applied_count += 1
+
+    logger.info("Applied default values to %d fields across %d games.", applied_count, len(games))
+    return games
 
 
 def normalize_list_of_values(games: List[Dict], field: str, out_col: str, errors: List[Dict]) -> pd.DataFrame:
@@ -337,6 +459,8 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
     if not src.exists():
         raise FileNotFoundError(f"Input file not found: {src}")
     games = load_exported_games(src)
+    games = filter_valid_games(games, errors)
+    games = apply_default_values(games, config)
     if not games:
         logger.warning("No records in %s; nothing to normalize.", src)
         return
