@@ -32,13 +32,12 @@ Validation Process:
 All skipped records and missing values are logged to error_log_YYYYMMDD_HHMMSS.json
 """
 
-
 import argparse
 import json
 import logging
 import yaml
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Literal, cast
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -89,6 +88,7 @@ def save_error_log(errors: List[Dict], output_dir: Path) -> None:
 
     logger.info(" Error log saved to %s", error_log_path)
 
+
 def filter_valid_games(games: List[Dict], errors: List[Dict]) -> List[Dict]:
     """
     Filter out invalid game records missing critical fields.
@@ -113,7 +113,7 @@ def filter_valid_games(games: List[Dict], errors: List[Dict]) -> List[Dict]:
                 "error_type": "missing_critical_field",
                 "field": "id",
                 "game_data": str(game)
-                            })
+            })
             logger.error("Skipping game at index %d due to missing 'id' field.", idx)
             skipped_count += 1
             continue
@@ -125,7 +125,7 @@ def filter_valid_games(games: List[Dict], errors: List[Dict]) -> List[Dict]:
                 "error_type": "missing_critical_field",
                 "field": "name",
                 "game_data": str(game)
-                            })
+            })
             logger.error("Skipping game ID %s due to missing 'name' field.", game.get("id"))
             skipped_count += 1
             continue
@@ -176,6 +176,74 @@ def apply_default_values(games: List[Dict], config: Dict) -> List[Dict]:
 
     logger.info("Applied default values to %d fields across %d games.", applied_count, len(games))
     return games
+
+
+def detect_duplicate_game_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Detect duplicate game IDs in the DataFrame and log warnings.
+    :param:
+        df: DataFrame containing game records.
+    :return:
+        A DataFrame with duplicate game records.
+    """
+    duplicates = df[df.duplicated(subset=['id'], keep=False)]
+    if not duplicates.empty:
+        logger.warning("Found %d duplicate game IDs.", len(duplicates['id'].unique()))
+        for game_id in duplicates['id'].unique():
+            logger.warning("Game ID %d appears %d times",
+                           game_id, len(df[df['id'] == game_id]))
+    return duplicates
+
+
+def apply_deduplication_strategy(df: pd.DataFrame, key_col: List[str], strategy: str) -> pd.DataFrame:
+    before_count = len(df)
+
+    if strategy == 'keep_first':
+        result = df.drop_duplicates(subset=key_col, keep='first')
+    elif strategy == 'keep_last':
+        result = df.drop_duplicates(subset=key_col, keep='last')
+    elif strategy == 'merge':
+        if 'rating' in df.columns and 'name' in df.columns:
+            aggregated_dict = {}
+            if 'rating' in df.columns:
+                aggregated_dict['rating'] = 'mean'
+            if 'name' in df.columns:
+                aggregated_dict['name'] = 'first'
+            if 'aggregated_rating' in df.columns:
+                aggregated_dict['aggregated_rating'] = 'mean'
+            if 'first_release_date' in df.columns:
+                aggregated_dict['first_release_date'] = 'min'
+
+            result = df.groupby(key_col, as_index=False).agg(aggregated_dict)
+        else:
+            result = df.drop_duplicates(subset=key_col, keep='first')
+    else:
+        raise ValueError(f"Unknown deduplication strategy: {strategy}")
+
+    duplicates_removed = before_count - len(result)
+    if duplicates_removed > 0:
+        logger.info("Removed %d duplicate records using strategy '%s' (keys: %s)",
+                    duplicates_removed, strategy, key_col)
+    return result
+
+
+def log_duplicates_stats(tables: Dict[str, pd.DataFrame]) -> Dict[str, int]:
+    stats = {}
+
+    if 'games' in tables:  # Games table checking since it is the main table
+        games_duplicates = tables['games'].duplicated(subset=['id'], ).sum()
+        stats['games_duplicates'] = games_duplicates
+        logger.info("Games table duplicates found: %d", games_duplicates)
+
+    for table_name in ['genres', 'platforms', 'involved_companies']:
+        if table_name in tables:
+            df = tables[table_name]
+            key_col = ['game_id', f"{table_name[:-1]}_id"]  # game_id is the common key
+            duplicates = df.duplicated(subset=key_col).sum()
+            stats[f'{table_name}_duplicates'] = duplicates
+            logger.info("%s table duplicates found: %d", table_name.capitalize(), duplicates)
+
+    return stats
 
 
 def normalize_list_of_values(games: List[Dict], field: str, out_col: str, errors: List[Dict]) -> pd.DataFrame:
@@ -304,6 +372,7 @@ def transform_games(games: List[Dict], config: Dict) -> pd.DataFrame:
     """
     try:
         df = pd.json_normalize(games)
+        detect_duplicate_game_ids(df)
         keep = config.get("tables", {}).get("games", {}).get("fields", [])
         if 'first_release_date' in df.columns:  # Convert timestamp to datetime
             df['first_release_date'] = pd.to_datetime(df['first_release_date'], unit='s', errors='coerce')
@@ -434,13 +503,20 @@ def dump_normalized_table(df: pd.DataFrame, path: Path, output_config: Dict) -> 
         None
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    orient = output_config.get("orient", "records")
+
+    valid_orients = ["split", "records", "index", "columns", "values", "table"]
+    orient_value = output_config.get("orient", "records")
+    if orient_value not in valid_orients:
+        raise ValueError(f"Invalid JSON orient '{orient_value}'. Valid options are: {valid_orients}")
+    orient = cast(Literal["split", "records", "index", "columns", "values", "table"], orient_value)
+
     indent = output_config.get("indent", 2)
     force_ascii = output_config.get("force_ascii", False)
     df.to_json(path.as_posix(), orient=orient, indent=indent, force_ascii=force_ascii)
     logger.info("Wrote %s (rows=%d)", path, len(df))
 
 
+# noinspection PyDictCreation
 def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[str, Path] = "normalized",
                             config_path: Union[str, Path] = "config.yaml") -> None:
     """
@@ -453,6 +529,12 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         None
     """
     config = load_config(config_path)
+    deduplication_config = config.get("deduplication", {})
+    valid_strategies = ['keep_first', 'keep_last', 'merge']
+    strategy = deduplication_config.get("strategy", "keep_first")
+    if strategy not in valid_strategies:
+        raise ValueError(f"Invalid deduplication strategy '{strategy}'. Valid options are: {valid_strategies}")
+    logger.info("Using deduplication strategy: %s", strategy)
     errors = []
 
     src = Path(raw_json_path)
@@ -472,12 +554,19 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
 
     tables["games"] = transform_games(games, config)  # Games table
 
+    tables["games"] = apply_deduplication_strategy(tables["games"],
+                                                   key_col=['id'],
+                                                   strategy=strategy)
+
     if "genres" in table_configs:  # Genres table
         genres_cfg = table_configs["genres"]
         tables["genres"] = normalize_list_of_values(games,
                                                     genres_cfg["source_field"],
                                                     genres_cfg["output_column"],
                                                     errors)
+        tables["genres"] = apply_deduplication_strategy(tables["genres"],
+                                                        key_col=['game_id', 'genre_id'],
+                                                        strategy=strategy)
 
     if "platforms" in table_configs:  # Platforms table
         platforms_cfg = table_configs["platforms"]
@@ -485,13 +574,19 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
                                                        platforms_cfg["source_field"],
                                                        platforms_cfg["output_column"],
                                                        errors)
+        tables["platforms"] = apply_deduplication_strategy(tables["platforms"],
+                                                           key_col=['game_id', 'platform_id'],
+                                                           strategy=strategy)
 
     if "involved_companies" in table_configs:  # Involved Companies table
         involved_companies_cfg = table_configs["involved_companies"]
         tables["involved_companies"] = normalize_list_of_values(games,
-                                                               involved_companies_cfg["source_field"],
-                                                               involved_companies_cfg["output_column"],
-                                                               errors)
+                                                                involved_companies_cfg["source_field"],
+                                                                involved_companies_cfg["output_column"],
+                                                                errors)
+        tables["involved_companies"] = apply_deduplication_strategy(tables["involved_companies"],
+                                                                    key_col=['game_id', 'company_id'],
+                                                                    strategy=strategy)
 
         for bool_field in ['is_dev', 'is_publisher']:  # Convert boolean fields
             if bool_field in tables["involved_companies"].columns:
@@ -502,7 +597,7 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
     schemas = config.get("schemas", {})
 
     for name, df in tables.items():
-        if name in schemas: # Validate schema if defined
+        if name in schemas:  # Validate schema if defined
             try:
                 validate_schema(df, schemas[name])
                 logger.info("✓ Schema validation passed for table '%s'.", name)
@@ -542,6 +637,22 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         logger.info(" Platforms: %d unique, top 5:", len(platform_counts))
         for platform_id, count in platform_counts.head(5).items():
             logger.info("   %s: %d games", platform_id, count)
+
+    logger.info("=" * 60)
+
+    logger.info("Duplicate Records Statistics:")
+    duplicate_stats = log_duplicates_stats(tables)
+    if not duplicate_stats:
+        logger.info(" No duplicate statistics available.")
+
+    if "games_duplicates" in duplicate_stats:
+        logger.info(" Games table duplicates: %d", duplicate_stats["games_duplicates"])
+    if "genres_duplicates" in duplicate_stats:
+        logger.info(" Genres table duplicates: %d", duplicate_stats["genres_duplicates"])
+    if "platforms_duplicates" in duplicate_stats:
+        logger.info(" Platforms table duplicates: %d", duplicate_stats["platforms_duplicates"])
+    if "involved_companies_duplicates" in duplicate_stats:
+        logger.info(" Involved Companies table duplicates: %d", duplicate_stats["involved_companies_duplicates"])
 
     logger.info("=" * 60)
 

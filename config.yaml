@@ -51,6 +51,18 @@ defaults:
   platforms: []
   involved_companies: []
 
+deduplication:
+  strategy: keep_first
+  tables:
+    - games:
+        key: id
+    - genres:
+        key: [game_id, genre_id]
+    - platforms:
+        key: [game_id, platform_id]
+    - involved_companies:
+        key: [game_id, company_id]
+
 validation:
   required_fields:
     - id
