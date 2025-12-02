@@ -401,6 +401,7 @@ def transform_games(games: List[Dict], config: Dict) -> pd.DataFrame:
         detect_duplicate_game_ids(df)
         keep = config.get("tables", {}).get("games", {}).get("fields", [])
         if 'first_release_date' in df.columns:  # Convert timestamp to datetime
+            df['first_release_date'] = pd.to_datetime(df['first_release_date'], unit='s', errors='coerce')
             df['release_year'] = pd.to_datetime(df['first_release_date'], unit='s', errors='coerce').dt.year
         if 'id' in df.columns:  # Ensure 'id' is integer type
             df['id'] = pd.to_numeric(df['id'], errors='coerce').astype('Int64')
@@ -520,33 +521,54 @@ def load_exported_games(path: Path) -> Generator[Dict, None, None]:
         raise ValueError(f"Invalid JSON syntax in {path}: {e}")
 
 
-def dump_normalized_table(df: pd.DataFrame, path: Path, output_config: Dict) -> None:
+def dump_normalized_table(df: pd.DataFrame, path: Path, output_format: str = "json",
+                          output_config: Dict=None) -> None:
     """
-    Dump the normalized DataFrame to a JSON file.
+    Dump the normalized DataFrame to the specified format.
     :param:
         df: DataFrame to dump.
-        path: Path to the output JSON file.
-        output_config: Configuration for JSON output (orient, indent, force_ascii).
+        path: Path to the output file (without extension).
+        output_format: Output format ("csv", "json", "parquet").
+        output_config: Additional configuration for output.
     :return:
         None
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    output_config = output_config or {}
 
-    valid_orients = ["split", "records", "index", "columns", "values", "table"]
-    orient_value = output_config.get("orient", "records")
-    if orient_value not in valid_orients:
-        raise ValueError(f"Invalid JSON orient '{orient_value}'. Valid options are: {valid_orients}")
-    orient = cast(Literal["split", "records", "index", "columns", "values", "table"], orient_value)
+    if output_format == "csv":
+        csv_path = path.with_suffix('.csv')
+        encoding = output_config.get("encoding", "utf-8")
+        index = output_config.get("index", False)
+        df.to_csv(csv_path, index=index, encoding=encoding)
+        logger.info("Wrote %s (rows=%d)", csv_path, len(df))
 
-    indent = output_config.get("indent", 2)
-    force_ascii = output_config.get("force_ascii", False)
-    df.to_json(path.as_posix(), orient=orient, indent=indent, force_ascii=force_ascii)
-    logger.info("Wrote %s (rows=%d)", path, len(df))
+    elif output_format == "json":
+        valid_orients = ["split", "records", "index", "columns", "values", "table"]
+        orient_value = output_config.get("orient", "records")
+        if orient_value not in valid_orients:
+            raise ValueError(f"Invalid JSON orient '{orient_value}'. Valid options are: {valid_orients}")
+        orient = cast(Literal["split", "records", "index", "columns", "values", "table"], orient_value)
+
+        indent = output_config.get("indent", 2)
+        force_ascii = output_config.get("force_ascii", False)
+        df.to_json(path.as_posix(), orient=orient, indent=indent, force_ascii=force_ascii)
+        logger.info("Wrote %s (rows=%d)", path, len(df))
+
+    elif output_format == "parquet":
+        parquet_path = path.with_suffix('.parquet')
+        compression = output_config.get("compression", "snappy")
+        df.to_parquet(parquet_path, compression=compression, index=False)
+        logger.info("Wrote %s (rows=%d)", parquet_path, len(df))
+
+    else:
+        raise ValueError(f"Unsupported output format: {output_format}")
 
 
 # noinspection PyDictCreation
 def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[str, Path] = "normalized",
-                            batch_size: int = 1000, config_path: Union[str, Path] = "config.yaml") -> None:
+                            batch_size: int = 1000, config_path: Union[str, Path] = "config.yaml",
+                            output_format: str = "json") -> None:
     """
     Normalize the exported JSON file into tidy tables.
     :param:
@@ -623,7 +645,6 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         tables["games"]["platform_count"] = tables["games"]["platform_count"].fillna(0).astype("Int64")
         tables["games"].drop(columns=["game_id"], inplace=True, errors='ignore')
 
-
     if "involved_companies" in table_configs:  # Involved Companies table
         involved_companies_cfg = table_configs["involved_companies"]
         tables["involved_companies"] = normalize_list_of_values(games,
@@ -639,7 +660,7 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
                 tables["involved_companies"][bool_field] = tables["involved_companies"][bool_field].astype('boolean')
 
     out_dir = Path(output_dir)
-    output_config = config.get("output", {})
+    output_config = config.get("output", {}).get(output_format, {})
     schemas = config.get("schemas", {})
 
     for name, df in tables.items():
@@ -650,7 +671,7 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
             except ValueError as e:
                 logger.error("✗ Schema validation failed for table '%s': %s", name, e)
                 raise
-        dump_normalized_table(df, out_dir / f"{name}.json", output_config)
+        dump_normalized_table(df, out_dir / f"{name}.json", output_format, output_config)
 
     save_error_log(errors, out_dir)
     logger.info("=" * 60)
@@ -739,6 +760,7 @@ def _parse_args():
     p.add_argument("--validate-only", action="store_true", help="Only validate the input file without transforming.")
     p.add_argument("--config", default="config.yaml", help="Path to YAML configuration file (default: `config.yaml`).")
     p.add_argument("--batch-size", type=int, default=1000, help="Batch size for processing (default: 1000).")
+    p.add_argument("--format", choices=["json", "csv", "parquet"], default="json", help="Output format (default: json).")
     return p.parse_args()
 
 
@@ -750,4 +772,5 @@ if __name__ == "__main__":
         success = validate_input_file(args.input, args.config)
         exit(0 if success else 1)
     else:
-        normalize_exported_file(args.input, args.out_dir, batch_size=args.batch_size, config_path=args.config)
+        normalize_exported_file(args.input, args.out_dir, batch_size=args.batch_size, config_path=args.config,
+                                output_format=args.format)

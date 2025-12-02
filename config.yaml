@@ -94,7 +94,16 @@ validation:
     aggregated_rating: 100
 
 output:
-  format: json
-  indent: 2
-  force_ascii: false
-  orient: records
+  json:
+    indent: 2
+    force_ascii: false
+    orient: "records"
+
+  csv:
+    encoding: "utf-8"
+    index: false
+    sep: ","
+
+  parquet:
+    compression: "snappy" # For future use, options are: gzip, snappy, brotli, zstd, none
+    engine: "pyarrow"
