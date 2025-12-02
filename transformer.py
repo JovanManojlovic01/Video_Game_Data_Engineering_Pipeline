@@ -34,10 +34,11 @@ All skipped records and missing values are logged to error_log_YYYYMMDD_HHMMSS.j
 
 import argparse
 import json
+import ijson
 import logging
 import yaml
 from pathlib import Path
-from typing import Dict, List, Union, Literal, cast
+from typing import Dict, List, Union, Literal, cast, Generator
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -74,6 +75,26 @@ def load_config(config_path: Union[str, Path] = "config.yaml") -> Dict:
 
     logger.info("Configuration loaded from %s", path)
     return config
+
+
+def process_in_batches(games_generator, batch_size: int):
+    """
+    Process games in batches from a generator.
+    :param:
+        games_generator: Generator yielding game records.
+        batch_size: Size of each batch.
+    :return:
+        A generator yielding lists of game records in batches.
+    """
+    batch = []
+    for game in games_generator:
+        batch.append(game)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+
+    if batch:
+        yield batch
 
 
 def save_error_log(errors: List[Dict], output_dir: Path) -> None:
@@ -235,10 +256,15 @@ def log_duplicates_stats(tables: Dict[str, pd.DataFrame]) -> Dict[str, int]:
         stats['games_duplicates'] = games_duplicates
         logger.info("Games table duplicates found: %d", games_duplicates)
 
-    for table_name in ['genres', 'platforms', 'involved_companies']:
+    table_keys = {
+        'genres': ['game_id', 'genre_id'],
+        'platforms': ['game_id', 'platform_id'],
+        'involved_companies': ['game_id', 'company_id']
+                    }
+
+    for table_name, key_col in table_keys.items():
         if table_name in tables:
             df = tables[table_name]
-            key_col = ['game_id', f"{table_name[:-1]}_id"]  # game_id is the common key
             duplicates = df.duplicated(subset=key_col).sum()
             stats[f'{table_name}_duplicates'] = duplicates
             logger.info("%s table duplicates found: %d", table_name.capitalize(), duplicates)
@@ -466,7 +492,7 @@ def validate_input_file(raw_json_path: Union[str, Path], config_path: Union[str,
         return False
 
     try:
-        games = load_exported_games(src)
+        games = list(load_exported_games(src))
         validate_required_fields(games, config)
         logger.info("✓ Validation passed: %s (%d records)", src, len(games))
         return True
@@ -475,7 +501,7 @@ def validate_input_file(raw_json_path: Union[str, Path], config_path: Union[str,
         return False
 
 
-def load_exported_games(path: Path) -> List[Dict]:
+def load_exported_games(path: Path) -> Generator[Dict, None, None]:
     """
     Load exported games from a JSON file.
     :param:
@@ -484,10 +510,9 @@ def load_exported_games(path: Path) -> List[Dict]:
         A list of game records (dictionaries).
     """
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        validate_structure(data, path)
-        return data
+        with path.open("rb") as fh:
+            for game in ijson.items(fh, "item"):
+                yield game
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON syntax in {path}: {e}")
 
@@ -518,7 +543,7 @@ def dump_normalized_table(df: pd.DataFrame, path: Path, output_config: Dict) -> 
 
 # noinspection PyDictCreation
 def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[str, Path] = "normalized",
-                            config_path: Union[str, Path] = "config.yaml") -> None:
+                            batch_size: int = 1000, config_path: Union[str, Path] = "config.yaml") -> None:
     """
     Normalize the exported JSON file into tidy tables.
     :param:
@@ -540,14 +565,19 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
     src = Path(raw_json_path)
     if not src.exists():
         raise FileNotFoundError(f"Input file not found: {src}")
-    games = load_exported_games(src)
-    games = filter_valid_games(games, errors)
-    games = apply_default_values(games, config)
-    if not games:
-        logger.warning("No records in %s; nothing to normalize.", src)
-        return
+    games_generator = load_exported_games(src)
+    all_games = []
 
-    validate_required_fields(games, config)
+    for batch in process_in_batches(games_generator, batch_size):
+        filtered_batch = filter_valid_games(batch, errors)
+        batch_with_defaults = apply_default_values(filtered_batch, config)
+        all_games.extend(batch_with_defaults)
+
+    if not all_games:
+        logger.warning("No records in %s; nothing to normalize.", src)
+
+    validate_required_fields(all_games, config)
+    games = all_games
 
     table_configs = config.get("tables", {})
     tables = {}
@@ -692,6 +722,7 @@ def _parse_args():
     p.add_argument("--out-dir", default="normalized", help="Output directory (default: `normalized`).")
     p.add_argument("--validate-only", action="store_true", help="Only validate the input file without transforming.")
     p.add_argument("--config", default="config.yaml", help="Path to YAML configuration file (default: `config.yaml`).")
+    p.add_argument("--batch-size", type=int, default=1000, help="Batch size for processing (default: 1000).")
     return p.parse_args()
 
 
@@ -703,4 +734,4 @@ if __name__ == "__main__":
         success = validate_input_file(args.input, args.config)
         exit(0 if success else 1)
     else:
-        normalize_exported_file(args.input, args.out_dir, args.config)
+        normalize_exported_file(args.input, args.out_dir, batch_size=args.batch_size, config_path=args.config)
