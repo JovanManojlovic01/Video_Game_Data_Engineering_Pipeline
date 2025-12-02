@@ -401,12 +401,15 @@ def transform_games(games: List[Dict], config: Dict) -> pd.DataFrame:
         detect_duplicate_game_ids(df)
         keep = config.get("tables", {}).get("games", {}).get("fields", [])
         if 'first_release_date' in df.columns:  # Convert timestamp to datetime
-            df['first_release_date'] = pd.to_datetime(df['first_release_date'], unit='s', errors='coerce')
+            df['release_year'] = pd.to_datetime(df['first_release_date'], unit='s', errors='coerce').dt.year
         if 'id' in df.columns:  # Ensure 'id' is integer type
             df['id'] = pd.to_numeric(df['id'], errors='coerce').astype('Int64')
         for rating in ['rating', 'aggregated_rating']:
             if rating in df.columns:  # Ensure ratings are float type
                 df[rating] = pd.to_numeric(df[rating], errors='coerce').astype('Float64')
+                df['has_rating'] = (df['rating'].notna() & (df['rating'] > 0)).astype('boolean')
+            if 'aggregated_rating' in df.columns:
+                df['has_aggregated_rating'] = (df['aggregated_rating'].notna() & (df['aggregated_rating'] > 0)).astype('boolean')
         existing = [c for c in keep if c in df.columns]
         return df[existing] if existing else pd.DataFrame(columns=keep)
     except Exception as e:
@@ -598,6 +601,12 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
                                                         key_col=['game_id', 'genre_id'],
                                                         strategy=strategy)
 
+    if "genres" in tables and not tables["genres"].empty:
+        genre_counts = tables["genres"].groupby("game_id").size().reset_index(name="genre_count")
+        tables["games"] = tables["games"].merge(genre_counts, left_on="id", right_on="game_id", how="left")
+        tables["games"]["genre_count"] = tables["games"]["genre_count"].fillna(0).astype("Int64")
+        tables["games"].drop(columns=["game_id"], inplace=True, errors='ignore')
+
     if "platforms" in table_configs:  # Platforms table
         platforms_cfg = table_configs["platforms"]
         tables["platforms"] = normalize_list_of_values(games,
@@ -607,6 +616,13 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         tables["platforms"] = apply_deduplication_strategy(tables["platforms"],
                                                            key_col=['game_id', 'platform_id'],
                                                            strategy=strategy)
+
+    if "platforms" in tables and not tables["platforms"].empty:
+        platform_counts = tables["platforms"].groupby("game_id").size().reset_index(name="platform_count")
+        tables["games"] = tables["games"].merge(platform_counts, left_on="id", right_on="game_id", how="left")
+        tables["games"]["platform_count"] = tables["games"]["platform_count"].fillna(0).astype("Int64")
+        tables["games"].drop(columns=["game_id"], inplace=True, errors='ignore')
+
 
     if "involved_companies" in table_configs:  # Involved Companies table
         involved_companies_cfg = table_configs["involved_companies"]
