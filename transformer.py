@@ -578,6 +578,7 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
     :return:
         None
     """
+    processing_start = datetime.now()
     config = load_config(config_path)
     deduplication_config = config.get("deduplication", {})
     valid_strategies = ['keep_first', 'keep_last', 'merge']
@@ -674,54 +675,16 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         dump_normalized_table(df, out_dir / f"{name}.json", output_format, output_config)
 
     save_error_log(errors, out_dir)
-    logger.info("=" * 60)
-    logger.info("Data Quality Summary:")
-    logger.info(" Total games processed: %d", len(games))
-    logger.info(" Total errors encountered: %d", len(errors))
-    for name, df in tables.items():
-        logger.info(" Table '%s': %d records", name.capitalize(), len(df))
-    logger.info("=" * 60)
-
-    logger.info("Summary Statistics:")
-
-    if "games" in tables and not tables["games"].empty:  # Games statistics
-        games_df = tables["games"]
-        logger.info(" Games table:")
-        if "released" in games_df.columns:
-            logger.info("   Released dates: %d unique values", games_df["released"].nunique())
-        if "rating" in games_df.columns:
-            logger.info("   Average rating: %.2f", games_df["rating"].mean())
-            logger.info("   Rating range: %.2f - %.2f", games_df["rating"].min(), games_df["rating"].max())
-
-    if "genres" in tables and not tables["genres"].empty:  # Genres statistics
-        genre_counts = tables["genres"].groupby("genre_id").size().sort_values(ascending=False)
-        logger.info(" Genres: %d unique, top 5:", len(genre_counts))
-        for genre_id, count in genre_counts.head(5).items():
-            logger.info("   %s: %d games", genre_id, count)
-
-    if "platforms" in tables and not tables["platforms"].empty:  # Platforms statistics
-        platform_counts = tables["platforms"].groupby("platform_id").size().sort_values(ascending=False)
-        logger.info(" Platforms: %d unique, top 5:", len(platform_counts))
-        for platform_id, count in platform_counts.head(5).items():
-            logger.info("   %s: %d games", platform_id, count)
-
-    logger.info("=" * 60)
-
-    logger.info("Duplicate Records Statistics:")
     duplicate_stats = log_duplicates_stats(tables)
-    if not duplicate_stats:
-        logger.info(" No duplicate statistics available.")
 
-    if "games_duplicates" in duplicate_stats:
-        logger.info(" Games table duplicates: %d", duplicate_stats["games_duplicates"])
-    if "genres_duplicates" in duplicate_stats:
-        logger.info(" Genres table duplicates: %d", duplicate_stats["genres_duplicates"])
-    if "platforms_duplicates" in duplicate_stats:
-        logger.info(" Platforms table duplicates: %d", duplicate_stats["platforms_duplicates"])
-    if "involved_companies_duplicates" in duplicate_stats:
-        logger.info(" Involved Companies table duplicates: %d", duplicate_stats["involved_companies_duplicates"])
+    processing_end = datetime.now()
+    processing_time = (processing_end - processing_end).total_seconds()
 
-    logger.info("=" * 60)
+    summary_report = generate_summary_report(tables, errors, duplicate_stats, processing_time)
+    uniqueness_metrics = calculate_uniqueness_metrics(tables)
+    summary_report["data_quality"]["uniqueness"] = uniqueness_metrics
+
+    save_summary_report(summary_report, out_dir)
 
 
 def validate_schema(df: pd.DataFrame, expected_schema: Dict[str, str]) -> bool:
@@ -746,6 +709,75 @@ def validate_schema(df: pd.DataFrame, expected_schema: Dict[str, str]) -> bool:
         elif expected_type == 'float' and not pd.api.types.is_float_dtype(actual_type):
             raise ValueError(f"Column {col}: expected float, got {actual_type}")
     return True
+
+
+def generate_summary_report(tables: Dict[str, pd.DataFrame], errors: List[Dict], duplicate_stats: Dict[str, int],
+                            processing_time: float) -> Dict:
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "processing_time_seconds": round(processing_time, 2),
+        "tables": {},
+        "data_quality": {
+            "total_errors": len(errors),
+            "duplicate_records": duplicate_stats,
+            "completeness": {}
+        },
+        "errors_summary": {
+          "total": len(errors),
+          "by_type": {}
+        }
+    }
+
+    for table_name, df in tables.items():  # Recording counts per table
+        report["tables"][table_name] = {
+            "record_count": len(df),
+            "columns": list(df.columns),
+            "missing_values": df.isnull().sum().to_dict()
+        }
+
+        completeness = (1-df.isnull().sum() / len(df)) * 100  # Completeness in percentage
+        report["data_quality"]["completeness"][table_name] = completeness.to_dict()
+
+    for error in errors:  # Breaking down the error type
+        error_type = error.get("error_type", "unknown")
+        report["errors_summary"]["by_type"][error_type] = \
+            report["errors_summary"]["by_type"] .get(error_type, 0) + 1
+
+    return report
+
+
+def calculate_uniqueness_metrics(tables: Dict[str, pd.DataFrame]) -> Dict[str, Dict]:
+    uniqueness = {}
+
+    key_mappings = {
+        'games': ['id'],
+        'genres': ['game_id', 'genre_id'],
+        'platforms': ['game_id', 'platform_id'],
+        'involved_companies': ['game_id', 'company_id']
+    }
+
+    for table_name, key_columns in key_mappings.items():
+        if table_name in tables:
+            df = tables[table_name]
+            total_records = len(df)
+            unique_records = df.drop_duplicates(subset=key_columns).shape[0]
+            uniqueness[table_name] = {
+                "total_records": total_records,
+                "unique_records": unique_records,
+                "uniqueness_percentage": round(((unique_records / total_records) * 100), 2) if total_records > 0 else 0.0
+            }
+
+    return uniqueness
+
+
+def save_summary_report(report: Dict, output_dir: Path) -> None:
+    report_path = output_dir / f"transformation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with report_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+
+    logger.info("Summary report saved to %s", report_path)
 
 
 def _parse_args():
