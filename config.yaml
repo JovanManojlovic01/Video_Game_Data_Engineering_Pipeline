@@ -3,9 +3,14 @@ tables:
     fields:
       - id
       - name
+      - has_rating
       - rating
+      - has_aggregated_rating
       - aggregated_rating
       - first_release_date
+      - release_year
+      - platform_count
+      - genre_count
 
 
   genres:
@@ -32,8 +37,13 @@ schemas:
     id: int
     name: str
     first_release_date: datetime
+    release_year: int
+    has_rating: bool
     rating: float
+    has_aggregated_rating: bool
     aggregated_rating: float
+    platform_count: int
+    genre_count: int
   genres:
     genre_id: int
     game_id: int
@@ -47,6 +57,8 @@ schemas:
 defaults:
   rating: 0.0
   aggregated_rating: 0.0
+  has_rating: false
+  has_aggregated_rating: false
   genres: []
   platforms: []
   involved_companies: []
@@ -111,7 +123,16 @@ validation:
     aggregated_rating: 100
 
 output:
-  format: json
-  indent: 2
-  force_ascii: false
-  orient: records
+  json:
+    indent: 2
+    force_ascii: false
+    orient: "records"
+
+  csv:
+    encoding: "utf-8"
+    index: false
+    sep: ","
+
+  parquet:
+    compression: "snappy" # For future use, options are: gzip, snappy, brotli, zstd, none
+    engine: "pyarrow"
