@@ -8,7 +8,7 @@ _REQUIRED_ENV_VARS = ("clientID", "clientSecret", "tokenFile")
 _DOTENV_LOADED = False
 
 
-def _ensure_dotenv_loaded() -> None:
+def ensure_dotenv_loaded() -> None:
     """
     Ensure that the .env file is loaded only once.
     """
@@ -25,7 +25,7 @@ def ensure_env_variables() -> None:
     """
     Ensure that all required environment variables are set.
     """
-    _ensure_dotenv_loaded()
+    ensure_dotenv_loaded()
     missing = [var for var in _REQUIRED_ENV_VARS if not os.getenv(var)]
     if missing:
         logger.critical("Missing required environment variables: %s", ", ".join(missing))
@@ -36,7 +36,7 @@ def get_token_file_path() -> str:
     """
     Get the path to the token file from environment variables or use default.
     """
-    _ensure_dotenv_loaded()
+    ensure_dotenv_loaded()
     token_file = os.getenv("tokenFile")
     if not token_file:
         token_file = "token.json"

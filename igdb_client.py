@@ -45,7 +45,7 @@ def fetch_games(settings: QuerySettings, token: str) -> List[Any]:
         )
         response.raise_for_status()
 
-        content_type = response.headers.get("Content-Type", "") # IGDB should return JSON
+        content_type = response.headers.get("Content-Type", "")  # IGDB should return JSON
         if "application/json" not in content_type.lower():
             logger.error("Unexpected content type from IGDB: %s", content_type)
             return []

@@ -1,0 +1,1000 @@
+"""
+MISSING VALUE HANDLING STRATEGY
+================================
+
+Critical Fields (records are SKIPPED if missing):
+- id: Unique game identifier (cannot be null or empty)
+- name: Game title (cannot be null or empty)
+
+Optional Fields with Default Values:
+- rating: Defaults to 0.0 if missing or None (empty lists [] are preserved)
+- aggregated_rating: Defaults to 0.0 if missing or None
+- first_release_date: Defaults to None (unknown release)
+- genres: Defaults to empty list [] if missing or None
+- platforms: Defaults to empty list [] if missing or None
+- involved_companies: Defaults to empty list [] if missing or None
+
+Note: Empty strings "" are treated as missing for string fields.
+      Empty lists [] are NOT replaced with defaults (only None or missing fields).
+
+Recommended Fields (WARNING logged if missing):
+- summary: Game description
+- storyline: Game narrative
+
+Validation Process:
+1. Load raw JSON data
+2. Filter out records missing critical fields (logged to errors)
+3. Apply default values to optional fields
+4. Validate remaining records against schema
+5. Transform into normalized tables
+6. Generate missing value report
+
+All skipped records and missing values are logged to error_log_YYYYMMDD_HHMMSS.json
+"""
+
+import argparse
+import json
+import ijson
+import logging
+import yaml
+from pathlib import Path
+from typing import Dict, List, Union, Literal, cast, Generator, Any
+from datetime import datetime
+from dataclasses import dataclass
+
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DataQualityMetrics:
+    processed_count: int = 0
+    skipped_count: int = 0
+    error_count: int = 0
+
+    def log_progress(self):
+        logger.info("Progress: processed: %d, skipped: %d, errors: %d",
+                    self.processed_count, self.skipped_count, self.error_count)
+
+
+def load_config(config_path: Union[str, Path] = "config.yaml") -> Dict:
+    """
+    Load configuration from a YAML file.
+    :param:
+        config_path: Path to the YAML configuration file.
+    :return:
+        A dictionary with the configuration data.
+    """
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {path}")
+
+    with path.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    logger.info("Configuration loaded from %s", path)
+    return config
+
+
+def process_in_batches(games_generator, batch_size: int):
+    """
+    Process games in batches from a generator.
+    :param:
+        games_generator: Generator yielding game records.
+        batch_size: Size of each batch.
+    :return:
+        A generator yielding lists of game records in batches.
+    """
+    batch = []
+    for game in games_generator:
+        batch.append(game)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+
+    if batch:
+        yield batch
+
+
+def save_error_log(errors: List[Dict], output_dir: Path) -> None:
+    """
+    Save the error log to a JSON file.
+    :param:
+        errors: list of error records (dictionaries).
+        output_dir: directory to save the error log file.
+    :return:
+        None
+    """
+    if not errors:
+        return
+
+    error_log_path = output_dir / f"error_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with error_log_path.open("w", encoding="utf-8") as f:
+        json.dump(errors, f, indent=4, ensure_ascii=False)
+
+    logger.info(" Error log saved to %s", error_log_path)
+
+
+def filter_valid_games(games: List[Dict], errors: List[Dict]) -> List[Dict]:
+    """
+    Filter out invalid game records missing critical fields.
+
+    STRATEGY:
+    - Critical fields (id, name) must exist, records are SKIPPED if missing
+    - All skipped records are logged to the errors list with context
+    - Valid games are returned for further processing
+
+    :param:
+        games: list of game records (dictionaries).
+        errors: list to append error records to.
+    :return:
+        A list of valid game records.
+    """
+    valid_games = []
+    skipped_count = 0
+    for idx, game in enumerate(games):
+        if not game.get("id"):
+            errors.append({
+                "index": idx,
+                "error_type": "missing_critical_field",
+                "field": "id",
+                "game_data": str(game)
+            })
+            logger.error("Skipping game at index %d due to missing 'id' field.", idx)
+            skipped_count += 1
+            continue
+
+        if not game.get("name"):
+            errors.append({
+                "index": idx,
+                "game_id": game.get("id"),
+                "error_type": "missing_critical_field",
+                "field": "name",
+                "game_data": str(game)
+            })
+            logger.error("Skipping game ID %s due to missing 'name' field.", game.get("id"))
+            skipped_count += 1
+            continue
+
+        valid_games.append(game)
+
+    logger.info("Filtered %d valid games out of %d total; (skipped %d)",
+                len(valid_games), len(games), skipped_count)
+    return valid_games
+
+
+def apply_default_values(games: List[Dict], config: Dict) -> List[Dict]:
+    """
+    Apply default values to missing fields in game records.
+
+    Default values:
+    - rating: 0.0 (no rating available)
+    - aggregated_rating: 0.0 (no aggregated rating)
+    - genres: [] (no genres specified)
+    - platforms: [] (no platforms specified)
+    - involved_companies: [] (no companies involved)
+
+    :param:
+        games: list of game records (dictionaries).
+        config: configuration dictionary.
+    :return:
+        A list of game records with defaults applied.
+    """
+    defaults = config.get("defaults", {
+        "rating": 0.0,
+        "aggregated_rating": 0.0,
+        "genres": [],
+        "platforms": [],
+        "involved_companies": []
+    })
+
+    if not defaults:
+        logger.warning("No default values specified in configuration.")
+        return games
+
+    applied_count = 0
+    for game in games:
+        for field, default_value in defaults.items():
+            if field not in game or game[field] is None:
+                game[field] = default_value
+                logger.debug("Applied default for game ID %s: %s=%s", game.get("id"), field, default_value)
+                applied_count += 1
+
+    logger.info("Applied default values to %d fields across %d games.", applied_count, len(games))
+    return games
+
+
+def detect_duplicate_game_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Detect duplicate game IDs in the DataFrame and log warnings.
+    :param:
+        df: DataFrame containing game records.
+    :return:
+        A DataFrame with duplicate game records.
+    """
+    duplicates = df[df.duplicated(subset=['id'], keep=False)]
+    if not duplicates.empty:
+        logger.warning("Found %d duplicate game IDs.", len(duplicates['id'].unique()))
+        for game_id in duplicates['id'].unique():
+            logger.warning("Game ID %d appears %d times",
+                           game_id, len(df[df['id'] == game_id]))
+    return duplicates
+
+
+def apply_deduplication_strategy(df: pd.DataFrame, key_col: List[str], strategy: str) -> pd.DataFrame:
+    """
+    Apply deduplication strategy to the DataFrame based on the specified key column(s).
+    :param:
+        df: DataFrame to deduplicate.
+        key_col: List of column names to identify duplicates.
+        strategy: Deduplication strategy ('keep_first', 'keep_last', 'merge').
+    :return:
+        A deduplicated DataFrame.
+    """
+    before_count = len(df)
+
+    if strategy == 'keep_first':
+        result = df.drop_duplicates(subset=key_col, keep='first')
+    elif strategy == 'keep_last':
+        result = df.drop_duplicates(subset=key_col, keep='last')
+    elif strategy == 'merge':
+        if 'rating' in df.columns and 'name' in df.columns:
+            aggregated_dict = {}
+            if 'rating' in df.columns:
+                aggregated_dict['rating'] = 'mean'
+            if 'name' in df.columns:
+                aggregated_dict['name'] = 'first'
+            if 'aggregated_rating' in df.columns:
+                aggregated_dict['aggregated_rating'] = 'mean'
+            if 'first_release_date' in df.columns:
+                aggregated_dict['first_release_date'] = 'min'
+
+            result = df.groupby(key_col, as_index=False).agg(aggregated_dict)
+        else:
+            result = df.drop_duplicates(subset=key_col, keep='first')
+    else:
+        raise ValueError(f"Unknown deduplication strategy: {strategy}")
+
+    duplicates_removed = before_count - len(result)
+    if duplicates_removed > 0:
+        logger.info("Removed %d duplicate records using strategy '%s' (keys: %s)",
+                    duplicates_removed, strategy, key_col)
+    return result
+
+
+def log_duplicates_stats(tables: Dict[str, pd.DataFrame]) -> Dict[str, int]:
+    stats = {}
+
+    if 'games' in tables:  # Games table checking since it is the main table
+        games_duplicates = tables['games'].duplicated(subset=['id'], ).sum()
+        stats['games_duplicates'] = games_duplicates
+        logger.info("Games table duplicates found: %d", games_duplicates)
+
+    table_keys = {
+        'genres': ['game_id', 'genre_id'],
+        'platforms': ['game_id', 'platform_id'],
+        'involved_companies': ['game_id', 'company_id']
+    }
+
+    for table_name, key_col in table_keys.items():
+        if table_name in tables:
+            df = tables[table_name]
+            duplicates = df.duplicated(subset=key_col).sum()
+            stats[f'{table_name}_duplicates'] = duplicates
+            logger.info("%s table duplicates found: %d", table_name.capitalize(), duplicates)
+
+    return stats
+
+
+def normalize_list_of_values(games: List[Dict], field: str, out_col: str, errors: List[Dict]) -> pd.DataFrame:
+    """
+    Normalize a list of values from the specified field in the "games" data.
+    :param: games: list of game records (dictionaries).
+            field: source field containing list of values.
+            out_col: specified output column name.
+    :return:
+        A DataFrame with game_id and the specified output column.
+    """
+    if errors is None:
+        errors = []
+
+    rows = []
+    metrics = DataQualityMetrics()
+    for g in games:
+        gid = g.get("id")
+        try:
+            vals = g.get(field, []) or []
+            if vals is None or (isinstance(vals, list) and len(vals) == 0):
+                logger.warning("Game ID %s has empty or null field %s", gid, field)
+            if isinstance(vals, list):
+                for v in vals:
+                    rows.append({"game_id": gid, out_col: v})
+                    metrics.processed_count += 1
+            else:
+                logger.warning("Expected list for field %s in game ID %s, got %s",
+                               field, gid, type(vals).__name__)
+                errors.append({
+                    "game_id": gid,
+                    "field": field,
+                    "error_type": "type_mismatch",
+                    "expected_type": "list",
+                    "actual_type": type(vals).__name__,
+                    "value": str(g.get(field))
+                })
+        except Exception as e:
+            logger.error("Error processing game ID %s field '%s': %s (value=%s)",
+                         gid, field, e, g.get(field))
+            metrics.error_count += 1
+            errors.append({
+                "game_id": gid,
+                "field": field,
+                "error_type": "exception",
+                "error": str(e),
+                "value": str(g.get(field))
+            })
+            continue
+    metrics.log_progress()
+    df = pd.DataFrame(rows, columns=["game_id", out_col])
+    if 'game_id' in df.columns:
+        df['game_id'] = pd.to_numeric(df['game_id'], errors='coerce').astype('Int64')
+    return df
+
+
+def normalize_list_of_dicts(games: List[Dict], field: str, rename_map: Dict[str, str],
+                            errors: List[Dict]) -> pd.DataFrame:
+    """
+    Normalize a list of dictionaries from the specified field in the "games" data.
+    :param: games: list of game records (dictionaries).
+            field: source field containing list of dictionaries.
+            rename_map: mapping of old field names to new column names.
+    :return:
+        A DataFrame with game_id and the renamed columns.
+    """
+    if errors is None:
+        errors = []
+
+    rows = []
+    metrics = DataQualityMetrics()
+    for g in games:
+        gid = g.get("id")
+        try:
+            items = g.get(field, []) or []
+            if items is None or (isinstance(items, list) and len(items) == 0):
+                logger.warning("Game ID %s has empty or null field %s", gid, field)
+            if not isinstance(items, list):
+                continue
+            for it in items:
+                if isinstance(it, dict):
+                    rec = {"game_id": gid}
+                    rec.update({new: it.get(old) for old, new in rename_map.items()})
+                    rows.append(rec)
+                    metrics.processed_count += 1
+                else:
+                    logger.warning("Expected dict in list for field %s in game ID %s, got %s",
+                                   field, gid, type(it).__name__)
+                    errors.append({
+                        "game_id": gid,
+                        "field": field,
+                        "error_type": "type_mismatch",
+                        "expected_type": "dict",
+                        "actual_type": type(it).__name__,
+                        "value": str(g.get(field))
+                    })
+        except Exception as e:
+            logger.error("Error processing game ID %s field '%s': %s (items=%s)",
+                         gid, field, e, g.get(field))
+            metrics.error_count += 1
+            errors.append({
+                "game_id": gid,
+                "field": field,
+                "error_type": "exception",
+                "error": str(e),
+                "value": str(g.get(field))
+            })
+            continue
+    metrics.log_progress()
+    df = pd.DataFrame(rows, columns=["game_id", *rename_map.values()])
+    if 'game_id' in df.columns:
+        df['game_id'] = pd.to_numeric(df['game_id'], errors='coerce').astype('Int64')
+    if 'company_id' in df.columns:
+        df['company_id'] = pd.to_numeric(df['company_id'], errors='coerce').astype('Int64')
+    return df
+
+
+def transform_games(games: List[Dict], config: Dict) -> pd.DataFrame:
+    """
+    Transform the games data into a normalized DataFrame.
+    :param:
+        games: list of game records (dictionaries).
+        config: configuration dictionary.
+    :return:
+        A DataFrame with selected game fields.
+    """
+    try:
+        df = pd.json_normalize(games)
+        detect_duplicate_game_ids(df)
+        keep = config.get("tables", {}).get("games", {}).get("fields", [])
+        if 'first_release_date' in df.columns:  # Convert timestamp to datetime
+            df['first_release_date'] = pd.to_datetime(df['first_release_date'], unit='s', errors='coerce')
+            df['release_year'] = pd.to_datetime(df['first_release_date'], unit='s', errors='coerce').dt.year
+        if 'id' in df.columns:  # Ensure 'id' is integer type
+            df['id'] = pd.to_numeric(df['id'], errors='coerce').astype('Int64')
+        for rating in ['rating', 'aggregated_rating']:
+            if rating in df.columns:  # Ensure ratings are float type
+                df[rating] = pd.to_numeric(df[rating], errors='coerce').astype('Float64')
+                df['has_rating'] = (df['rating'].notna() & (df['rating'] > 0)).astype('boolean')
+            if 'aggregated_rating' in df.columns:
+                df['has_aggregated_rating'] = (df['aggregated_rating'].notna() & (df['aggregated_rating'] > 0)).astype(
+                    'boolean')
+        existing = [c for c in keep if c in df.columns]
+        return df[existing] if existing else pd.DataFrame(columns=keep)
+    except Exception as e:
+        logger.error("Error normalizing games data: %s", e)
+        return pd.DataFrame(columns=config.get("tables", {}).get("games", {}).get("fields", []))
+
+
+def validate_structure(data: any, source_path: Path) -> None:
+    """
+    Validate the structure of the loaded data.
+    :param:
+        data: Loaded data to validate.
+        source_path: Path to the source file for error messages.
+    :return:
+        None
+    """
+    if not isinstance(data, list):
+        raise ValueError(f"Expected a list of game records in {source_path}, got {type(data).__name__}.")
+
+    if not data:
+        logger.warning("No records found in %s.", source_path)
+        return
+
+    non_dict_items = [i for i, item in enumerate(data) if not isinstance(item, dict)]
+    if non_dict_items:
+        raise ValueError(f"Expected each game record to be a dictionary in {source_path}, "
+                         f"but found non-dictionary items at indices: {non_dict_items}.")
+
+
+def validate_required_fields(games: List[Dict], config: Dict) -> None:
+    """
+    Validate that required fields are present in the game records.
+    :param:
+        games: list of game records (dictionaries).
+        config: configuration dictionary.
+    :return:
+        None
+    """
+    validation = config.get("validation", {})
+    required = validation.get("required_fields", ['id', 'name'])
+    recommended = validation.get("recommended_fields", [])
+    min_values = validation.get("min_values", {})
+    max_values = validation.get("max_values", {})
+    sample_size = validation.get("sample_size", 10)
+    sample = games[:min(sample_size, len(games))]
+
+    for i, game in enumerate(sample):  # Required fields
+        missing = [field for field in required if field not in game]
+        if missing:
+            raise ValueError(f"Game record at index {i} is missing required fields: {missing}")
+
+    for i, game in enumerate(sample):  # Recommended fields
+        missing_recommended = [field for field in recommended if field not in game]
+        if missing_recommended:
+            logger.warning("Record %d is missing recommended fields: %s", i, missing_recommended)
+
+    for i, game in enumerate(sample):  # Minimum values
+        for field, min_count in min_values.items():
+            if field in game and game[field] is not None:
+                if game[field] < min_count:
+                    logger.warning("Record %d: %s=%s is below minimum %s", i, field, game[field], min_count)
+
+    for i, game in enumerate(sample):  # Maximum values
+        for field, max_count in max_values.items():
+            if field in game and game[field] is not None:
+                if game[field] > max_count:
+                    logger.warning("Record %d: %s=%s exceeds maximum %s", i, field, game[field], max_count)
+
+
+def validate_input_file(raw_json_path: Union[str, Path], config_path: Union[str, Path] = "config.yaml") -> bool:
+    """
+    Validate the input JSON file structure and required fields.
+    :param:
+        raw_json_path: Path to the raw JSON file.
+    :return:
+        True if validation passes, False otherwise.
+    """
+    config = load_config(config_path)
+
+    src = Path(raw_json_path)
+    if not src.exists():
+        logger.error(f"Input file not found: {src}")
+        return False
+
+    try:
+        games = list(load_exported_games(src))
+        validate_required_fields(games, config)
+        logger.info("✓ Validation passed: %s (%d records)", src, len(games))
+        return True
+    except (ValueError, json.JSONDecodeError) as e:
+        logger.error("✗ Validation failed: %s", e)
+        return False
+
+
+def load_exported_games(path: Path) -> Generator[Dict, None, None]:
+    """
+    Load exported games from a JSON file.
+    :param:
+        path: Path to the JSON file.
+    :return:
+        A list of game records (dictionaries).
+    """
+    try:
+        with path.open("rb") as fh:
+            for game in ijson.items(fh, "item"):
+                yield game
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON syntax in {path}: {e}")
+
+
+def dump_normalized_table(df: pd.DataFrame, path: Path, output_format: str = "json",
+                          output_config: Dict = None) -> None:
+    """
+    Dump the normalized DataFrame to the specified format.
+    :param:
+        df: DataFrame to dump.
+        path: Path to the output file (without extension).
+        output_format: Output format ("csv", "json", "parquet").
+        output_config: Additional configuration for output.
+    :return:
+        None
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    output_config = output_config or {}
+
+    if output_format == "csv":
+        csv_path = path.with_suffix('.csv')
+        encoding = output_config.get("encoding", "utf-8")
+        index = output_config.get("index", False)
+        df.to_csv(csv_path, index=index, encoding=encoding)
+        logger.info("Wrote %s (rows=%d)", csv_path, len(df))
+
+    elif output_format == "json":
+        valid_orients = ["split", "records", "index", "columns", "values", "table"]
+        orient_value = output_config.get("orient", "records")
+        if orient_value not in valid_orients:
+            raise ValueError(f"Invalid JSON orient '{orient_value}'. Valid options are: {valid_orients}")
+        orient = cast(Literal["split", "records", "index", "columns", "values", "table"], orient_value)
+
+        indent = output_config.get("indent", 2)
+        force_ascii = output_config.get("force_ascii", False)
+        df.to_json(path.as_posix(), orient=orient, indent=indent, force_ascii=force_ascii)
+        logger.info("Wrote %s (rows=%d)", path, len(df))
+
+    elif output_format == "parquet":
+        parquet_path = path.with_suffix('.parquet')
+        compression = output_config.get("compression", "snappy")
+        df.to_parquet(parquet_path, compression=compression, index=False)
+        logger.info("Wrote %s (rows=%d)", parquet_path, len(df))
+
+    else:
+        raise ValueError(f"Unsupported output format: {output_format}")
+
+
+def extract_sample_values(df: pd.DataFrame, number_samples: int = 5) -> dict[Any, list[Any]]:
+    """
+    Extract sample unique values from each column in the DataFrame.
+    :param:
+        df: DataFrame to extract samples from.
+        number_samples: Number of unique samples to extract per column.
+    :return:
+        A dictionary mapping column names to lists of sample unique values.
+    """
+    samples = {}
+    for col in df.columns:
+        unique_values = df[col].dropna().unique()[:number_samples]  # Unique non-null values
+        samples[col] = [
+            val.isoformat() if isinstance(val, (pd.Timestamp, datetime)) else
+            val.item() if hasattr(val, 'item') else val
+            for val in unique_values
+        ]
+
+    return samples
+
+
+def calculate_unique_counts(df: pd.DataFrame) -> Dict[str, int]:
+    """
+    Calculate the count of unique values for each column in the DataFrame.
+    :param:
+        df: DataFrame to analyze.
+    :return:
+        A dictionary mapping column names to their unique value counts.
+    """
+    unique_counts = {}
+    for col in df.columns:
+        unique_counts[col] = df[col].nunique()
+
+    return unique_counts
+
+
+def generate_markdown_schema(tables: Dict[str, pd.DataFrame], output_path: Path) -> None:
+    """
+    Generate a markdown documentation of the database schema.
+    :param:
+        tables: Dictionary of table names to DataFrames.
+        output_path: Path to save the markdown file.
+    :return:
+        None
+    """
+    md_lines = ["# Database Schema Documentation\n", f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"]
+
+    for table_name, df in tables.items():
+        md_lines.append(f"\n## Table: `{table_name}`\n")
+        md_lines.append(f"**Total Records:** {len(df)}\n")
+
+        # Create column table
+        md_lines.append("\n| Column | Type | Nulls | Unique | Sample Values |")
+        md_lines.append("|--------|------|-------|--------|---------------|")
+
+        for col in df.columns:
+            col_type = str(df[col].dtype)
+            null_count = df[col].isnull().sum()
+            unique_count = df[col].nunique()
+            samples = df[col].dropna().unique()[:3]
+            sample_str = ", ".join(str(s) for s in samples)
+
+            md_lines.append(f"| `{col}` | {col_type} | {null_count} | "
+                            f"{unique_count} | {sample_str} |")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(md_lines), encoding="utf-8")
+    logger.info("Markdown schema saved to %s", output_path)
+
+
+def add_descriptions_to_schema(schema_report: Dict, config: Dict) -> Dict:
+    """
+    Add descriptions to the schema report from the configuration.
+    :param:
+        schema_report: Schema report dictionary.
+        config: Configuration dictionary.
+    :return:
+        Updated schema report with descriptions.
+    """
+    descriptions = config.get("descriptions", {})
+    table_descriptions = descriptions.get("tables", {})
+    column_descriptions = descriptions.get("columns", {})
+
+    for table_name in schema_report["tables"]:
+        schema_report["tables"][table_name]["description"] = \
+            table_descriptions.get(table_name, "No description available.")
+
+        schema_report["tables"][table_name]["columns_descriptions"] = \
+            column_descriptions.get(table_name, {})
+
+    return schema_report
+
+
+# noinspection PyDictCreation
+def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[str, Path] = "normalized",
+                            batch_size: int = 1000, config_path: Union[str, Path] = "config.yaml",
+                            output_format: str = "json") -> None:
+    """
+    Normalize the exported raw JSON file into structured tables.
+    :param:
+        raw_json_path: Path to the raw JSON file.
+        output_dir: Directory to save normalized tables and reports.
+        batch_size: Number of records to process in each batch.
+        config_path: Path to the configuration YAML file.
+        output_format: Output format for normalized tables ("csv", "json", "parquet").
+    :return:
+        None
+    """
+    processing_start = datetime.now()
+    config = load_config(config_path)
+    deduplication_config = config.get("deduplication", {})
+    valid_strategies = ['keep_first', 'keep_last', 'merge']
+    strategy = deduplication_config.get("strategy", "keep_first")
+    if strategy not in valid_strategies:
+        raise ValueError(f"Invalid deduplication strategy '{strategy}'. Valid options are: {valid_strategies}")
+    logger.info("Using deduplication strategy: %s", strategy)
+    errors = []
+
+    src = Path(raw_json_path)
+    if not src.exists():
+        raise FileNotFoundError(f"Input file not found: {src}")
+    games_generator = load_exported_games(src)
+    all_games = []
+
+    for batch in process_in_batches(games_generator, batch_size):
+        filtered_batch = filter_valid_games(batch, errors)
+        batch_with_defaults = apply_default_values(filtered_batch, config)
+        all_games.extend(batch_with_defaults)
+
+    if not all_games:
+        logger.warning("No records in %s; nothing to normalize.", src)
+
+    validate_required_fields(all_games, config)
+    games = all_games
+
+    table_configs = config.get("tables", {})
+    tables = {}
+
+    tables["games"] = transform_games(games, config)  # Games table
+
+    tables["games"] = apply_deduplication_strategy(tables["games"],
+                                                   key_col=['id'],
+                                                   strategy=strategy)
+
+    if "genres" in table_configs:  # Genres table
+        genres_cfg = table_configs["genres"]
+        tables["genres"] = normalize_list_of_values(games,
+                                                    genres_cfg["source_field"],
+                                                    genres_cfg["output_column"],
+                                                    errors)
+        tables["genres"] = apply_deduplication_strategy(tables["genres"],
+                                                        key_col=['game_id', 'genre_id'],
+                                                        strategy=strategy)
+
+    if "genres" in tables and not tables["genres"].empty:
+        genre_counts = tables["genres"].groupby("game_id").size().reset_index(name="genre_count")
+        tables["games"] = tables["games"].merge(genre_counts, left_on="id", right_on="game_id", how="left")
+        tables["games"]["genre_count"] = tables["games"]["genre_count"].fillna(0).astype("Int64")
+        tables["games"].drop(columns=["game_id"], inplace=True, errors='ignore')
+
+    if "platforms" in table_configs:  # Platforms table
+        platforms_cfg = table_configs["platforms"]
+        tables["platforms"] = normalize_list_of_values(games,
+                                                       platforms_cfg["source_field"],
+                                                       platforms_cfg["output_column"],
+                                                       errors)
+        tables["platforms"] = apply_deduplication_strategy(tables["platforms"],
+                                                           key_col=['game_id', 'platform_id'],
+                                                           strategy=strategy)
+
+    if "platforms" in tables and not tables["platforms"].empty:
+        platform_counts = tables["platforms"].groupby("game_id").size().reset_index(name="platform_count")
+        tables["games"] = tables["games"].merge(platform_counts, left_on="id", right_on="game_id", how="left")
+        tables["games"]["platform_count"] = tables["games"]["platform_count"].fillna(0).astype("Int64")
+        tables["games"].drop(columns=["game_id"], inplace=True, errors='ignore')
+
+    if "involved_companies" in table_configs:  # Involved Companies table
+        involved_companies_cfg = table_configs["involved_companies"]
+        tables["involved_companies"] = normalize_list_of_dicts(games,
+                                                               field=involved_companies_cfg["source_field"],
+                                                               rename_map={
+                                                                   "company_id": involved_companies_cfg[
+                                                                       "output_column"]},
+                                                               errors=errors)
+
+        tables["involved_companies"] = apply_deduplication_strategy(tables["involved_companies"],
+                                                                    key_col=['game_id', 'company_id'],
+                                                                    strategy=strategy)
+
+        for bool_field in ['is_dev', 'is_publisher']:  # Convert boolean fields
+            if bool_field in tables["involved_companies"].columns:
+                tables["involved_companies"][bool_field] = tables["involved_companies"][bool_field].astype('boolean')
+
+    schema_report = {
+        "tables": {}
+    }
+
+    for table_name, df in tables.items():
+        schema_report["tables"][table_name] = {
+            "record_count": len(df),
+            "columns": {
+                col: {
+                    "type": str(df[col].dtype),
+                    "null_count": int(df[col].isnull().sum()),
+                    "unique_count": int(df[col].nunique()),
+                    "sample_values": extract_sample_values(df[[col]], 5)[col]
+                }
+                for col in df.columns
+            }
+        }
+    schema_report = add_descriptions_to_schema(schema_report, config)
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    schema_json_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"  # Save schema report
+    # as JSON
+    with schema_json_path.open("w", encoding="utf-8") as f:
+        json.dump(schema_report, f, indent=2, ensure_ascii=False)
+    logger.info("Schema report saved to %s", schema_json_path)
+
+    schema_yaml_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml"  # Save schema report
+    with schema_yaml_path.open("w", encoding="utf-8") as f:
+        yaml.dump(schema_report, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    logger.info("Schema report saved to %s", schema_yaml_path)
+
+    schema_markdown_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"  # Save schema
+    # documentation as Markdown
+    generate_markdown_schema(tables, schema_markdown_path)
+
+    out_dir = Path(output_dir)
+    output_config = config.get("output", {}).get(output_format, {})
+    schemas = config.get("schemas", {})
+
+    for name, df in tables.items():
+        if name in schemas:  # Validate schema if defined
+            try:
+                validate_schema(df, schemas[name])
+                logger.info("✓ Schema validation passed for table '%s'.", name)
+            except ValueError as e:
+                logger.error("✗ Schema validation failed for table '%s': %s", name, e)
+                raise
+        dump_normalized_table(df, out_dir / f"{name}.json", output_format, output_config)
+
+    save_error_log(errors, out_dir)
+    duplicate_stats = log_duplicates_stats(tables)
+
+    processing_end = datetime.now()
+    processing_time = (processing_end - processing_end).total_seconds()
+
+    summary_report = generate_summary_report(tables, errors, duplicate_stats, processing_time)
+    uniqueness_metrics = calculate_uniqueness_metrics(tables)
+    summary_report["data_quality"]["uniqueness"] = uniqueness_metrics
+
+    save_summary_report(summary_report, out_dir)
+
+
+def validate_schema(df: pd.DataFrame, expected_schema: Dict[str, str]) -> bool:
+    """
+    Validate the DataFrame against the expected schema.
+    :param:
+        df: DataFrame to validate.
+        expected_schema: Dictionary mapping column names to expected data types.
+    :return:
+        True if the DataFrame matches the expected schema, raises ValueError otherwise.
+    """
+    for col, expected_type in expected_schema.items():
+        if col not in df.columns:
+            continue
+        actual_type = df[col].dtype
+        if expected_type == 'datetime' and not pd.api.types.is_datetime64_any_dtype(actual_type):
+            raise ValueError(f"Column {col}: expected datetime, got {actual_type}")
+        elif expected_type == 'int' and not pd.api.types.is_integer_dtype(actual_type):
+            raise ValueError(f"Column {col}: expected int, got {actual_type}")
+        elif expected_type == 'bool' and not pd.api.types.is_bool_dtype(actual_type):
+            raise ValueError(f"Column {col}: expected bool, got {actual_type}")
+        elif expected_type == 'float' and not pd.api.types.is_float_dtype(actual_type):
+            raise ValueError(f"Column {col}: expected float, got {actual_type}")
+    return True
+
+
+def generate_summary_report(tables: Dict[str, pd.DataFrame], errors: List[Dict], duplicate_stats: Dict[str, int],
+                            processing_time: float) -> Dict:
+    """
+    Generate a summary report of the normalization process.
+    :param:
+        tables: Dictionary of table names to DataFrames.
+        errors: List of error records.
+        duplicate_stats: Dictionary of duplicate statistics.
+        processing_time: Total processing time in seconds.
+    :return:
+        A summary report dictionary.
+    """
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "processing_time_seconds": round(processing_time, 2),
+        "tables": {},
+        "data_quality": {
+            "total_errors": len(errors),
+            "duplicate_records": duplicate_stats,
+            "completeness": {}
+        },
+        "errors_summary": {
+            "total": len(errors),
+            "by_type": {}
+        }
+    }
+
+    for table_name, df in tables.items():  # Recording counts per table
+        report["tables"][table_name] = {
+            "record_count": len(df),
+            "columns": list(df.columns),
+            "missing_values": df.isnull().sum().to_dict()
+        }
+
+        completeness = (1 - df.isnull().sum() / len(df)) * 100  # Completeness in percentage
+        report["data_quality"]["completeness"][table_name] = completeness.to_dict()
+
+    for error in errors:  # Breaking down the error type
+        error_type = error.get("error_type", "unknown")
+        report["errors_summary"]["by_type"][error_type] = \
+            report["errors_summary"]["by_type"].get(error_type, 0) + 1
+
+    return report
+
+
+def calculate_uniqueness_metrics(tables: Dict[str, pd.DataFrame]) -> Dict[str, Dict]:
+    """
+    Calculate uniqueness metrics for key tables.
+    :param:
+        tables: Dictionary of table names to DataFrames.
+    :return:
+        A dictionary with uniqueness metrics per table.
+    """
+    uniqueness = {}
+
+    key_mappings = {
+        'games': ['id'],
+        'genres': ['game_id', 'genre_id'],
+        'platforms': ['game_id', 'platform_id'],
+        'involved_companies': ['game_id', 'company_id']
+    }
+
+    for table_name, key_columns in key_mappings.items():
+        if table_name in tables:
+            df = tables[table_name]
+            total_records = len(df)
+            unique_records = df.drop_duplicates(subset=key_columns).shape[0]
+            uniqueness[table_name] = {
+                "total_records": total_records,
+                "unique_records": unique_records,
+                "uniqueness_percentage": round(((unique_records / total_records) * 100),
+                                               2) if total_records > 0 else 0.0
+            }
+
+    return uniqueness
+
+
+def save_summary_report(report: Dict, output_dir: Path) -> None:
+    """
+    Save the summary report as a JSON file.
+    :param:
+        report: Summary report dictionary.
+        output_dir: Output directory path.
+    :return:
+        None
+    """
+    report_path = output_dir / f"transformation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def convert_types(obj):
+        if isinstance(obj, dict):
+            return {k: convert_types(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_types(item) for item in obj]
+        elif hasattr(obj, 'item'):  # numpy types
+            return obj.item()
+        elif isinstance(obj, (pd.Timestamp, datetime)):
+            return obj.isoformat()
+        return obj
+
+    report = convert_types(report)
+
+    with report_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+
+    logger.info("Summary report saved to %s", report_path)
+
+
+def _parse_args():
+    """
+    Parse command-line arguments.
+    :return:
+        Parsed arguments.
+    """
+    p = argparse.ArgumentParser(description="Normalize JSON produced by exporter.py into tidy tables.")
+    p.add_argument("input", nargs="?", default="games_data.json", help="Path to raw JSON (default: `games_data.json`).")
+    p.add_argument("--out-dir", default="normalized", help="Output directory (default: `normalized`).")
+    p.add_argument("--validate-only", action="store_true", help="Only validate the input file without transforming.")
+    p.add_argument("--config", default="config.yaml", help="Path to YAML configuration file (default: `config.yaml`).")
+    p.add_argument("--batch-size", type=int, default=1000, help="Batch size for processing (default: 1000).")
+    p.add_argument("--format", choices=["json", "csv", "parquet"], default="json",
+                   help="Output format (default: json).")
+    return p.parse_args()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    args = _parse_args()
+
+    if args.validate_only:
+        success = validate_input_file(args.input, args.config)
+        exit(0 if success else 1)
+    else:
+        normalize_exported_file(args.input, args.out_dir, batch_size=args.batch_size, config_path=args.config,
+                                output_format=args.format)

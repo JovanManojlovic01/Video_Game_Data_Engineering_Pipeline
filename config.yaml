@@ -1,0 +1,138 @@
+tables:
+  games:
+    fields:
+      - id
+      - name
+      - has_rating
+      - rating
+      - has_aggregated_rating
+      - aggregated_rating
+      - first_release_date
+      - release_year
+      - platform_count
+      - genre_count
+
+
+  genres:
+    source_field: genres
+    output_column: genre_id
+    api_fields:
+      - name
+
+
+  platforms:
+    source_field: platforms
+    output_column: platform_id
+    api_fields:
+      - name
+      - generation
+
+
+  involved_companies:  # Optional table
+    source_field: involved_companies
+    output_column: company_id
+
+schemas:
+  games:
+    id: int
+    name: str
+    first_release_date: datetime
+    release_year: int
+    has_rating: bool
+    rating: float
+    has_aggregated_rating: bool
+    aggregated_rating: float
+    platform_count: int
+    genre_count: int
+  genres:
+    genre_id: int
+    game_id: int
+  platforms:
+    platform_id : int
+    game_id: int
+  involved_companies:
+    company_id: int
+    game_id: int
+
+defaults:
+  rating: 0.0
+  aggregated_rating: 0.0
+  has_rating: false
+  has_aggregated_rating: false
+  genres: []
+  platforms: []
+  involved_companies: []
+
+deduplication:
+  strategy: keep_first
+  tables:
+    - games:
+        key: id
+    - genres:
+        key: [game_id, genre_id]
+    - platforms:
+        key: [game_id, platform_id]
+    - involved_companies:
+        key: [game_id, company_id]
+
+descriptions:
+  tables:
+    games: "Contains detailed information about video games."
+    genres: "Maps games to their respective genres."
+    platforms: "Maps games to the platforms they are available on."
+    involved_companies: "Maps games to the companies involved in their development or publishing."
+
+  columns:
+    games:
+        id: "Unique identifier for the game."
+        name: "Name of the game."
+        has_rating: "Indicates if the game has a user rating."
+        rating: "User rating of the game (0-100)."
+        has_aggregated_rating: "Indicates if the game has an aggregated rating."
+        aggregated_rating: "Aggregated rating of the game (0-100)."
+        first_release_date: "The date when the game was first released."
+        release_year: "The year when the game was first released."
+        platform_count: "Number of platforms the game is available on."
+        genre_count: "Number of genres associated with the game."
+    genres:
+        genre_id: "Unique identifier for the genre."
+        game_id: "Unique identifier for the game."
+    platforms:
+        platform_id: "Unique identifier for the platform."
+        game_id: "Unique identifier for the game."
+    involved_companies:
+        company_id: "Unique identifier for the company."
+        game_id: "Unique identifier for the game."
+
+validation:
+  required_fields:
+    - id
+    - name
+  recommended_fields:
+    - rating
+    - first_release_date
+    - aggregated_rating
+    - genres
+    - platforms
+  sample_size: 10
+  min_values:
+    rating: 0
+    aggregated_rating: 0
+  max_values:
+    rating: 100
+    aggregated_rating: 100
+
+output:
+  json:
+    indent: 2
+    force_ascii: false
+    orient: "records"
+
+  csv:
+    encoding: "utf-8"
+    index: false
+    sep: ","
+
+  parquet:
+    compression: "snappy" # For future use, options are: gzip, snappy, brotli, zstd, none
+    engine: "pyarrow"
