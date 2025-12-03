@@ -38,7 +38,7 @@ import ijson
 import logging
 import yaml
 from pathlib import Path
-from typing import Dict, List, Union, Literal, cast, Generator
+from typing import Dict, List, Union, Literal, cast, Generator, Any
 from datetime import datetime
 from dataclasses import dataclass
 
@@ -98,6 +98,14 @@ def process_in_batches(games_generator, batch_size: int):
 
 
 def save_error_log(errors: List[Dict], output_dir: Path) -> None:
+    """
+    Save the error log to a JSON file.
+    :param:
+        errors: list of error records (dictionaries).
+        output_dir: directory to save the error log file.
+    :return:
+        None
+    """
     if not errors:
         return
 
@@ -217,6 +225,15 @@ def detect_duplicate_game_ids(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def apply_deduplication_strategy(df: pd.DataFrame, key_col: List[str], strategy: str) -> pd.DataFrame:
+    """
+    Apply deduplication strategy to the DataFrame based on the specified key column(s).
+    :param:
+        df: DataFrame to deduplicate.
+        key_col: List of column names to identify duplicates.
+        strategy: Deduplication strategy ('keep_first', 'keep_last', 'merge').
+    :return:
+        A deduplicated DataFrame.
+    """
     before_count = len(df)
 
     if strategy == 'keep_first':
@@ -260,7 +277,7 @@ def log_duplicates_stats(tables: Dict[str, pd.DataFrame]) -> Dict[str, int]:
         'genres': ['game_id', 'genre_id'],
         'platforms': ['game_id', 'platform_id'],
         'involved_companies': ['game_id', 'company_id']
-                    }
+    }
 
     for table_name, key_col in table_keys.items():
         if table_name in tables:
@@ -410,7 +427,8 @@ def transform_games(games: List[Dict], config: Dict) -> pd.DataFrame:
                 df[rating] = pd.to_numeric(df[rating], errors='coerce').astype('Float64')
                 df['has_rating'] = (df['rating'].notna() & (df['rating'] > 0)).astype('boolean')
             if 'aggregated_rating' in df.columns:
-                df['has_aggregated_rating'] = (df['aggregated_rating'].notna() & (df['aggregated_rating'] > 0)).astype('boolean')
+                df['has_aggregated_rating'] = (df['aggregated_rating'].notna() & (df['aggregated_rating'] > 0)).astype(
+                    'boolean')
         existing = [c for c in keep if c in df.columns]
         return df[existing] if existing else pd.DataFrame(columns=keep)
     except Exception as e:
@@ -522,7 +540,7 @@ def load_exported_games(path: Path) -> Generator[Dict, None, None]:
 
 
 def dump_normalized_table(df: pd.DataFrame, path: Path, output_format: str = "json",
-                          output_config: Dict=None) -> None:
+                          output_config: Dict = None) -> None:
     """
     Dump the normalized DataFrame to the specified format.
     :param:
@@ -565,16 +583,111 @@ def dump_normalized_table(df: pd.DataFrame, path: Path, output_format: str = "js
         raise ValueError(f"Unsupported output format: {output_format}")
 
 
+def extract_sample_values(df: pd.DataFrame, number_samples: int = 5) -> dict[Any, list[Any]]:
+    """
+    Extract sample unique values from each column in the DataFrame.
+    :param:
+        df: DataFrame to extract samples from.
+        number_samples: Number of unique samples to extract per column.
+    :return:
+        A dictionary mapping column names to lists of sample unique values.
+    """
+    samples = {}
+    for col in df.columns:
+        unique_values = df[col].dropna().unique()[:number_samples]  # Unique non-null values
+        samples[col] = [
+            val.isoformat() if isinstance(val, (pd.Timestamp, datetime)) else
+            val.item() if hasattr(val, 'item') else val
+            for val in unique_values
+        ]
+
+    return samples
+
+
+def calculate_unique_counts(df: pd.DataFrame) -> Dict[str, int]:
+    """
+    Calculate the count of unique values for each column in the DataFrame.
+    :param:
+        df: DataFrame to analyze.
+    :return:
+        A dictionary mapping column names to their unique value counts.
+    """
+    unique_counts = {}
+    for col in df.columns:
+        unique_counts[col] = df[col].nunique()
+
+    return unique_counts
+
+
+def generate_markdown_schema(tables: Dict[str, pd.DataFrame], output_path: Path) -> None:
+    """
+    Generate a markdown documentation of the database schema.
+    :param:
+        tables: Dictionary of table names to DataFrames.
+        output_path: Path to save the markdown file.
+    :return:
+        None
+    """
+    md_lines = ["# Database Schema Documentation\n", f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"]
+
+    for table_name, df in tables.items():
+        md_lines.append(f"\n## Table: `{table_name}`\n")
+        md_lines.append(f"**Total Records:** {len(df)}\n")
+
+        # Create column table
+        md_lines.append("\n| Column | Type | Nulls | Unique | Sample Values |")
+        md_lines.append("|--------|------|-------|--------|---------------|")
+
+        for col in df.columns:
+            col_type = str(df[col].dtype)
+            null_count = df[col].isnull().sum()
+            unique_count = df[col].nunique()
+            samples = df[col].dropna().unique()[:3]
+            sample_str = ", ".join(str(s) for s in samples)
+
+            md_lines.append(f"| `{col}` | {col_type} | {null_count} | "
+                            f"{unique_count} | {sample_str} |")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(md_lines), encoding="utf-8")
+    logger.info("Markdown schema saved to %s", output_path)
+
+
+def add_descriptions_to_schema(schema_report: Dict, config: Dict) -> Dict:
+    """
+    Add descriptions to the schema report from the configuration.
+    :param:
+        schema_report: Schema report dictionary.
+        config: Configuration dictionary.
+    :return:
+        Updated schema report with descriptions.
+    """
+    descriptions = config.get("descriptions", {})
+    table_descriptions = descriptions.get("tables", {})
+    column_descriptions = descriptions.get("columns", {})
+
+    for table_name in schema_report["tables"]:
+        schema_report["tables"][table_name]["description"] = \
+            table_descriptions.get(table_name, "No description available.")
+
+        schema_report["tables"][table_name]["columns_descriptions"] = \
+            column_descriptions.get(table_name, {})
+
+    return schema_report
+
+
 # noinspection PyDictCreation
 def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[str, Path] = "normalized",
                             batch_size: int = 1000, config_path: Union[str, Path] = "config.yaml",
                             output_format: str = "json") -> None:
     """
-    Normalize the exported JSON file into tidy tables.
+    Normalize the exported raw JSON file into structured tables.
     :param:
         raw_json_path: Path to the raw JSON file.
-        output_dir: Output directory for normalized tables.
-        config_path: Path to the YAML configuration file.
+        output_dir: Directory to save normalized tables and reports.
+        batch_size: Number of records to process in each batch.
+        config_path: Path to the configuration YAML file.
+        output_format: Output format for normalized tables ("csv", "json", "parquet").
     :return:
         None
     """
@@ -648,10 +761,13 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
 
     if "involved_companies" in table_configs:  # Involved Companies table
         involved_companies_cfg = table_configs["involved_companies"]
-        tables["involved_companies"] = normalize_list_of_values(games,
-                                                                involved_companies_cfg["source_field"],
-                                                                involved_companies_cfg["output_column"],
-                                                                errors)
+        tables["involved_companies"] = normalize_list_of_dicts(games,
+                                                               field=involved_companies_cfg["source_field"],
+                                                               rename_map={
+                                                                   "company_id": involved_companies_cfg[
+                                                                       "output_column"]},
+                                                               errors=errors)
+
         tables["involved_companies"] = apply_deduplication_strategy(tables["involved_companies"],
                                                                     key_col=['game_id', 'company_id'],
                                                                     strategy=strategy)
@@ -659,6 +775,42 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         for bool_field in ['is_dev', 'is_publisher']:  # Convert boolean fields
             if bool_field in tables["involved_companies"].columns:
                 tables["involved_companies"][bool_field] = tables["involved_companies"][bool_field].astype('boolean')
+
+    schema_report = {
+        "tables": {}
+    }
+
+    for table_name, df in tables.items():
+        schema_report["tables"][table_name] = {
+            "record_count": len(df),
+            "columns": {
+                col: {
+                    "type": str(df[col].dtype),
+                    "null_count": int(df[col].isnull().sum()),
+                    "unique_count": int(df[col].nunique()),
+                    "sample_values": extract_sample_values(df[[col]], 5)[col]
+                }
+                for col in df.columns
+            }
+        }
+    schema_report = add_descriptions_to_schema(schema_report, config)
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    schema_json_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"  # Save schema report
+    # as JSON
+    with schema_json_path.open("w", encoding="utf-8") as f:
+        json.dump(schema_report, f, indent=2, ensure_ascii=False)
+    logger.info("Schema report saved to %s", schema_json_path)
+
+    schema_yaml_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml"  # Save schema report
+    with schema_yaml_path.open("w", encoding="utf-8") as f:
+        yaml.dump(schema_report, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    logger.info("Schema report saved to %s", schema_yaml_path)
+
+    schema_markdown_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"  # Save schema
+    # documentation as Markdown
+    generate_markdown_schema(tables, schema_markdown_path)
 
     out_dir = Path(output_dir)
     output_config = config.get("output", {}).get(output_format, {})
@@ -713,6 +865,16 @@ def validate_schema(df: pd.DataFrame, expected_schema: Dict[str, str]) -> bool:
 
 def generate_summary_report(tables: Dict[str, pd.DataFrame], errors: List[Dict], duplicate_stats: Dict[str, int],
                             processing_time: float) -> Dict:
+    """
+    Generate a summary report of the normalization process.
+    :param:
+        tables: Dictionary of table names to DataFrames.
+        errors: List of error records.
+        duplicate_stats: Dictionary of duplicate statistics.
+        processing_time: Total processing time in seconds.
+    :return:
+        A summary report dictionary.
+    """
     report = {
         "timestamp": datetime.now().isoformat(),
         "processing_time_seconds": round(processing_time, 2),
@@ -723,8 +885,8 @@ def generate_summary_report(tables: Dict[str, pd.DataFrame], errors: List[Dict],
             "completeness": {}
         },
         "errors_summary": {
-          "total": len(errors),
-          "by_type": {}
+            "total": len(errors),
+            "by_type": {}
         }
     }
 
@@ -735,18 +897,25 @@ def generate_summary_report(tables: Dict[str, pd.DataFrame], errors: List[Dict],
             "missing_values": df.isnull().sum().to_dict()
         }
 
-        completeness = (1-df.isnull().sum() / len(df)) * 100  # Completeness in percentage
+        completeness = (1 - df.isnull().sum() / len(df)) * 100  # Completeness in percentage
         report["data_quality"]["completeness"][table_name] = completeness.to_dict()
 
     for error in errors:  # Breaking down the error type
         error_type = error.get("error_type", "unknown")
         report["errors_summary"]["by_type"][error_type] = \
-            report["errors_summary"]["by_type"] .get(error_type, 0) + 1
+            report["errors_summary"]["by_type"].get(error_type, 0) + 1
 
     return report
 
 
 def calculate_uniqueness_metrics(tables: Dict[str, pd.DataFrame]) -> Dict[str, Dict]:
+    """
+    Calculate uniqueness metrics for key tables.
+    :param:
+        tables: Dictionary of table names to DataFrames.
+    :return:
+        A dictionary with uniqueness metrics per table.
+    """
     uniqueness = {}
 
     key_mappings = {
@@ -764,15 +933,37 @@ def calculate_uniqueness_metrics(tables: Dict[str, pd.DataFrame]) -> Dict[str, D
             uniqueness[table_name] = {
                 "total_records": total_records,
                 "unique_records": unique_records,
-                "uniqueness_percentage": round(((unique_records / total_records) * 100), 2) if total_records > 0 else 0.0
+                "uniqueness_percentage": round(((unique_records / total_records) * 100),
+                                               2) if total_records > 0 else 0.0
             }
 
     return uniqueness
 
 
 def save_summary_report(report: Dict, output_dir: Path) -> None:
+    """
+    Save the summary report as a JSON file.
+    :param:
+        report: Summary report dictionary.
+        output_dir: Output directory path.
+    :return:
+        None
+    """
     report_path = output_dir / f"transformation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    def convert_types(obj):
+        if isinstance(obj, dict):
+            return {k: convert_types(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_types(item) for item in obj]
+        elif hasattr(obj, 'item'):  # numpy types
+            return obj.item()
+        elif isinstance(obj, (pd.Timestamp, datetime)):
+            return obj.isoformat()
+        return obj
+
+    report = convert_types(report)
 
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
@@ -792,7 +983,8 @@ def _parse_args():
     p.add_argument("--validate-only", action="store_true", help="Only validate the input file without transforming.")
     p.add_argument("--config", default="config.yaml", help="Path to YAML configuration file (default: `config.yaml`).")
     p.add_argument("--batch-size", type=int, default=1000, help="Batch size for processing (default: 1000).")
-    p.add_argument("--format", choices=["json", "csv", "parquet"], default="json", help="Output format (default: json).")
+    p.add_argument("--format", choices=["json", "csv", "parquet"], default="json",
+                   help="Output format (default: json).")
     return p.parse_args()
 
 

@@ -75,6 +75,35 @@ deduplication:
     - involved_companies:
         key: [game_id, company_id]
 
+descriptions:
+  tables:
+    games: "Contains detailed information about video games."
+    genres: "Maps games to their respective genres."
+    platforms: "Maps games to the platforms they are available on."
+    involved_companies: "Maps games to the companies involved in their development or publishing."
+
+  columns:
+    games:
+        id: "Unique identifier for the game."
+        name: "Name of the game."
+        has_rating: "Indicates if the game has a user rating."
+        rating: "User rating of the game (0-100)."
+        has_aggregated_rating: "Indicates if the game has an aggregated rating."
+        aggregated_rating: "Aggregated rating of the game (0-100)."
+        first_release_date: "The date when the game was first released."
+        release_year: "The year when the game was first released."
+        platform_count: "Number of platforms the game is available on."
+        genre_count: "Number of genres associated with the game."
+    genres:
+        genre_id: "Unique identifier for the genre."
+        game_id: "Unique identifier for the game."
+    platforms:
+        platform_id: "Unique identifier for the platform."
+        game_id: "Unique identifier for the game."
+    involved_companies:
+        company_id: "Unique identifier for the company."
+        game_id: "Unique identifier for the game."
+
 validation:
   required_fields:
     - id
