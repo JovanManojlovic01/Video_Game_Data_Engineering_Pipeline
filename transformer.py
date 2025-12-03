@@ -277,7 +277,7 @@ def log_duplicates_stats(tables: Dict[str, pd.DataFrame]) -> Dict[str, int]:
         'genres': ['game_id', 'genre_id'],
         'platforms': ['game_id', 'platform_id'],
         'involved_companies': ['game_id', 'company_id']
-                    }
+    }
 
     for table_name, key_col in table_keys.items():
         if table_name in tables:
@@ -427,7 +427,8 @@ def transform_games(games: List[Dict], config: Dict) -> pd.DataFrame:
                 df[rating] = pd.to_numeric(df[rating], errors='coerce').astype('Float64')
                 df['has_rating'] = (df['rating'].notna() & (df['rating'] > 0)).astype('boolean')
             if 'aggregated_rating' in df.columns:
-                df['has_aggregated_rating'] = (df['aggregated_rating'].notna() & (df['aggregated_rating'] > 0)).astype('boolean')
+                df['has_aggregated_rating'] = (df['aggregated_rating'].notna() & (df['aggregated_rating'] > 0)).astype(
+                    'boolean')
         existing = [c for c in keep if c in df.columns]
         return df[existing] if existing else pd.DataFrame(columns=keep)
     except Exception as e:
@@ -539,7 +540,7 @@ def load_exported_games(path: Path) -> Generator[Dict, None, None]:
 
 
 def dump_normalized_table(df: pd.DataFrame, path: Path, output_format: str = "json",
-                          output_config: Dict=None) -> None:
+                          output_config: Dict = None) -> None:
     """
     Dump the normalized DataFrame to the specified format.
     :param:
@@ -594,8 +595,11 @@ def extract_sample_values(df: pd.DataFrame, number_samples: int = 5) -> dict[Any
     samples = {}
     for col in df.columns:
         unique_values = df[col].dropna().unique()[:number_samples]  # Unique non-null values
-        samples[col] = [val.item() if hasattr(val, 'item') else val
-                        for val in unique_values]
+        samples[col] = [
+            val.isoformat() if isinstance(val, (pd.Timestamp, datetime)) else
+            val.item() if hasattr(val, 'item') else val
+            for val in unique_values
+        ]
 
     return samples
 
@@ -757,10 +761,13 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
 
     if "involved_companies" in table_configs:  # Involved Companies table
         involved_companies_cfg = table_configs["involved_companies"]
-        tables["involved_companies"] = normalize_list_of_values(games,
-                                                                involved_companies_cfg["source_field"],
-                                                                involved_companies_cfg["output_column"],
-                                                                errors)
+        tables["involved_companies"] = normalize_list_of_dicts(games,
+                                                               field=involved_companies_cfg["source_field"],
+                                                               rename_map={
+                                                                   "company_id": involved_companies_cfg[
+                                                                       "output_column"]},
+                                                               errors=errors)
+
         tables["involved_companies"] = apply_deduplication_strategy(tables["involved_companies"],
                                                                     key_col=['game_id', 'company_id'],
                                                                     strategy=strategy)
@@ -788,12 +795,21 @@ def normalize_exported_file(raw_json_path: Union[str, Path], output_dir: Union[s
         }
     schema_report = add_descriptions_to_schema(schema_report, config)
 
-    schema_json_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    schema_json_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"  # Save schema report
+    # as JSON
     with schema_json_path.open("w", encoding="utf-8") as f:
         json.dump(schema_report, f, indent=2, ensure_ascii=False)
     logger.info("Schema report saved to %s", schema_json_path)
 
-    schema_markdown_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    schema_yaml_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml"  # Save schema report
+    with schema_yaml_path.open("w", encoding="utf-8") as f:
+        yaml.dump(schema_report, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    logger.info("Schema report saved to %s", schema_yaml_path)
+
+    schema_markdown_path = output_dir / f"schema_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"  # Save schema
+    # documentation as Markdown
     generate_markdown_schema(tables, schema_markdown_path)
 
     out_dir = Path(output_dir)
@@ -869,8 +885,8 @@ def generate_summary_report(tables: Dict[str, pd.DataFrame], errors: List[Dict],
             "completeness": {}
         },
         "errors_summary": {
-          "total": len(errors),
-          "by_type": {}
+            "total": len(errors),
+            "by_type": {}
         }
     }
 
@@ -881,13 +897,13 @@ def generate_summary_report(tables: Dict[str, pd.DataFrame], errors: List[Dict],
             "missing_values": df.isnull().sum().to_dict()
         }
 
-        completeness = (1-df.isnull().sum() / len(df)) * 100  # Completeness in percentage
+        completeness = (1 - df.isnull().sum() / len(df)) * 100  # Completeness in percentage
         report["data_quality"]["completeness"][table_name] = completeness.to_dict()
 
     for error in errors:  # Breaking down the error type
         error_type = error.get("error_type", "unknown")
         report["errors_summary"]["by_type"][error_type] = \
-            report["errors_summary"]["by_type"] .get(error_type, 0) + 1
+            report["errors_summary"]["by_type"].get(error_type, 0) + 1
 
     return report
 
@@ -917,7 +933,8 @@ def calculate_uniqueness_metrics(tables: Dict[str, pd.DataFrame]) -> Dict[str, D
             uniqueness[table_name] = {
                 "total_records": total_records,
                 "unique_records": unique_records,
-                "uniqueness_percentage": round(((unique_records / total_records) * 100), 2) if total_records > 0 else 0.0
+                "uniqueness_percentage": round(((unique_records / total_records) * 100),
+                                               2) if total_records > 0 else 0.0
             }
 
     return uniqueness
@@ -934,6 +951,19 @@ def save_summary_report(report: Dict, output_dir: Path) -> None:
     """
     report_path = output_dir / f"transformation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    def convert_types(obj):
+        if isinstance(obj, dict):
+            return {k: convert_types(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_types(item) for item in obj]
+        elif hasattr(obj, 'item'):  # numpy types
+            return obj.item()
+        elif isinstance(obj, (pd.Timestamp, datetime)):
+            return obj.isoformat()
+        return obj
+
+    report = convert_types(report)
 
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
@@ -953,7 +983,8 @@ def _parse_args():
     p.add_argument("--validate-only", action="store_true", help="Only validate the input file without transforming.")
     p.add_argument("--config", default="config.yaml", help="Path to YAML configuration file (default: `config.yaml`).")
     p.add_argument("--batch-size", type=int, default=1000, help="Batch size for processing (default: 1000).")
-    p.add_argument("--format", choices=["json", "csv", "parquet"], default="json", help="Output format (default: json).")
+    p.add_argument("--format", choices=["json", "csv", "parquet"], default="json",
+                   help="Output format (default: json).")
     return p.parse_args()
 
 
